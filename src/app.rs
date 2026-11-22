@@ -16,7 +16,13 @@ use std::sync::{Arc, Mutex};
 
 pub fn run(input: Option<PathBuf>) -> Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 880.0]).with_min_inner_size([1000.0, 600.0]).with_title("peugeot300mille"),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1440.0, 880.0])
+            .with_min_inner_size([1000.0, 600.0])
+            .with_title("peugeot300mille")
+            // Matches the .desktop file, so the dock shows the right icon.
+            .with_app_id("peugeot300mille")
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default()),
         ..Default::default()
     };
     eframe::run_native("peugeot300mille", options, Box::new(move |cc| Ok(Box::new(App::new(cc, input)))))

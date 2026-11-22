@@ -15,6 +15,16 @@ synchro ne sont pas celles du plugin : elles sont réglables dans `src/engine/am
 
 - Rust (stable), `ffmpeg` et `ffprobe` dans le PATH.
 
+## Installer
+
+```sh
+./install.sh              # programme + icône + entrée dans le menu des applications
+./install.sh --uninstall  # tout retirer
+```
+
+Relancer `./install.sh` après une modification du code. L'icône (l'écu aux deux léopards de
+Normandie, passé dans le circuit) est dans `assets/`.
+
 ## Lancer
 
 ```sh
