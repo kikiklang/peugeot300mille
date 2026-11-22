@@ -188,18 +188,31 @@ fn camera_tab(ui: &mut egui::Ui, p: &mut Params, st: &Status) {
     });
     let subs = [
         "Bouger la caméra. Le zoom et la rotation font les tunnels et les spirales.",
-        "Appliqué à chaque tour de boucle.",
+        "À chaque tour de boucle : la teinte tourne (contours arc-en-ciel), le négatif inverse la lumière. Ça s'accumule, lance la lecture.",
         "Le tube de la caméra : rémanence, halo, image imprimée.",
         "L'objectif, et ce qu'il voit de l'écran.",
     ];
+    // Everything below only acts through the camera loop.
+    let on = p.mix > 0.0;
+    if !on {
+        egui::Frame::NONE.fill(ACCENT.gamma_multiply(0.15)).corner_radius(8).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Mix est à 0 : la caméra est coupée, les réglages ci-dessous n'ont aucun effet. Monte Mix pour les activer.").color(ACCENT));
+        });
+        ui.add_space(10.0);
+    }
     for ((title, knobs), sub) in CAM_GROUPS.iter().zip(subs) {
-        card(ui, title, sub, |ui| knob_grid(ui, title, p, knobs, sound));
+        card(ui, title, sub, |ui| {
+            ui.add_enabled_ui(on, |ui| knob_grid(ui, title, p, knobs, sound));
+        });
     }
     card(ui, "Miroirs", "Des miroirs devant l'objectif : symétries et kaléidoscopes.", |ui| {
-        egui::ComboBox::from_id_salt("mirror").selected_text(MIRRORS[p.mirror as usize]).show_ui(ui, |ui| {
-            for (i, n) in MIRRORS.iter().enumerate() {
-                ui.selectable_value(&mut p.mirror, i as u8, *n);
-            }
+        ui.add_enabled_ui(on, |ui| {
+            egui::ComboBox::from_id_salt("mirror").selected_text(MIRRORS[p.mirror as usize]).show_ui(ui, |ui| {
+                for (i, n) in MIRRORS.iter().enumerate() {
+                    ui.selectable_value(&mut p.mirror, i as u8, *n);
+                }
+            });
         });
     });
 }
