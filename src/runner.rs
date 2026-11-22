@@ -158,6 +158,9 @@ pub struct Automation {
     /// Overlay files in use while recording.
     #[serde(default)]
     pub overlays: [Option<String>; 3],
+    /// The looping part of each overlay file (start, end) in seconds.
+    #[serde(default)]
+    pub overlay_ranges: [Option<(f64, f64)>; 3],
 }
 
 impl Automation {

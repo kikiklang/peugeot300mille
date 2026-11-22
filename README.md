@@ -46,8 +46,8 @@ police est installée.
 - **Calques vidéo** (onglet Image) : jusqu'à 3 boucles vidéo par-dessus l'image, chacune avec
   Placement (« Dans le circuit » : les effets l'abîment aussi ; « Par-dessus » : intact), Mode
   (Normal, Écran, Addition, Multiplier, Incrustation du noir / du blanc pour les boucles VJ),
-  Opacité, Taille, Position, Vitesse. Opacité et Taille sont pilotables par le son. Les 20
-  premières secondes de chaque boucle sont gardées en mémoire.
+  Opacité, Taille, Position, Vitesse. Opacité et Taille sont pilotables par le son. **Début** et **Fin** choisissent le
+  passage du fichier qui boucle (20 s au plus, gardées en mémoire).
 - **📼 Magnétoscope VHS** (entre le boîtier et la télé, sur le signal composite) : Usure
   (couleur qui bave et traîne, luma moins nette, souffle), Tracking (bande où l'image glisse et se déchire), Traits (les traits blancs qui défilent dans la bande),
   Drop-outs (traits blancs, ligne répétée), Instabilité (lignes qui tremblent, haut qui ondule,
@@ -76,7 +76,7 @@ police est installée.
 ```sh
 glitchbox render IN.mp4 OUT.mp4 --params reglage.json [--start 12.5] [--frames 300]
 glitchbox render IN.mp4 OUT.mp4 --automation sortie.automation.json
-glitchbox render IN.mp4 OUT.mp4 --params r.json --lut-in look.cube --lut-out film.cube --overlay1 boucle.mp4
+glitchbox render IN.mp4 OUT.mp4 --params r.json --lut-in look.cube --lut-out film.cube --overlay1 boucle.mp4@2.5-8
 ```
 
 ## Comment ça marche

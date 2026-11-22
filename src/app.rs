@@ -1,9 +1,9 @@
 //! The desktop window.
 
 use crate::audio::{bin_freq, freq_bin, N_BANDS, N_GLOBAL, SOURCES, SPEC_BINS};
-use crate::engine::{lut::Lut, overlay::{Clip, MODES, PLACES}};
+use crate::engine::{lut::Lut, overlay::{Clip, MAX_SECONDS, MODES, PLACES}};
 use crate::params::{Band, Params, AMP_KNOBS, BAND_HINTS, CAMERAS, CAM_GROUPS, CAM_KNOBS, INPUT_KNOBS, KNOBS, MIRRORS, SOUND_PRESETS, VHS_KNOBS};
-use crate::player::{self, Cmd, Shared, Status};
+use crate::player::{self, Cmd, OverlayInfo, Shared, Status};
 use crate::render::{render, Knobs};
 use crate::runner::Automation;
 use crate::ui::{self, card, knob_grid, ACCENT, REC, WEAK};
@@ -38,6 +38,8 @@ enum Tab {
 
 struct App {
     tab: Tab,
+    /// Overlay start/end being edited, before the loop is reloaded.
+    ov_edit: [Option<(f64, f64)>; 3],
     sel_band: usize,
     band_drag: Option<usize>,
     shared: Arc<Shared>,
@@ -69,7 +71,7 @@ impl App {
             *shared.params.lock().unwrap() = q.clamped();
         }
         let shot = std::env::var("GLITCHBOX_SCREENSHOT").ok().map(|p| (p, 0));
-        Self { tab, sel_band: 0, band_drag: None, shared, tx, tex: None, seen: 0, seek: None, job: None, shot }
+        Self { tab, ov_edit: [None; 3], sel_band: 0, band_drag: None, shared, tx, tex: None, seen: 0, seek: None, job: None, shot }
     }
 
     fn send(&self, c: Cmd) {
@@ -97,7 +99,13 @@ impl App {
             let input = PathBuf::from(&auto.source);
             let load = |p: &Option<String>| p.as_ref().and_then(|p| Lut::load(std::path::Path::new(p)).ok().map(Arc::new));
             let luts = (load(&auto.lut_in), load(&auto.lut_out));
-            let clips = auto.overlays.clone().map(|p| p.and_then(|p| Clip::load(std::path::Path::new(&p)).ok().map(Arc::new)));
+            let mut clips: [Option<Arc<Clip>>; 3] = [None, None, None];
+            for (i, c) in clips.iter_mut().enumerate() {
+                if let Some(p) = &auto.overlays[i] {
+                    let (s, e) = auto.overlay_ranges[i].map_or((0.0, None), |(s, e)| (s, Some(e)));
+                    *c = Clip::load_range(std::path::Path::new(p), s, e).ok().map(Arc::new);
+                }
+            }
             let r = render(&input, &out, Knobs::Recorded(&auto), auto.start, None, luts, clips, &cancel, &mut |d, n| {
                 *progress.lock().unwrap() = (d, n);
             });
@@ -142,8 +150,35 @@ fn lut_ui(ui: &mut egui::Ui, output: bool, name: &Option<String>, amount: &mut f
     }
 }
 
-fn overlay_ui(ui: &mut egui::Ui, slot: usize, p: &mut Params, name: &Option<String>, tx: &Sender<Cmd>, shared: &Shared, sound: bool) {
-    let title = match name {
+/// Loads (part of) a loop in the background, then hands it to the player.
+fn load_overlay(slot: usize, path: PathBuf, range: Option<(f64, f64)>, tx: &Sender<Cmd>, shared: &Arc<Shared>) {
+    shared.status.lock().unwrap().message = "Chargement de la boucle…".into();
+    let (tx, shared) = (tx.clone(), shared.clone());
+    std::thread::spawn(move || {
+        let (s, e) = range.map_or((0.0, None), |(s, e)| (s, Some(e)));
+        match Clip::load_range(&path, s, e) {
+            Ok(c) => {
+                shared.status.lock().unwrap().message = format!("Boucle chargée : {} ({:.1} s)", c.name, c.end - c.start);
+                let _ = tx.send(Cmd::SetOverlay { slot, clip: Some(Arc::new(c)) });
+            }
+            Err(e) => shared.status.lock().unwrap().message = format!("{e:#}"),
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn overlay_ui(
+    ui: &mut egui::Ui,
+    slot: usize,
+    p: &mut Params,
+    info: &Option<OverlayInfo>,
+    edit: &mut Option<(f64, f64)>,
+    tx: &Sender<Cmd>,
+    shared: &Arc<Shared>,
+    sound: bool,
+) {
+    let name = info.as_ref().map(|i| i.name.clone());
+    let title = match &name {
         Some(n) => RichText::new(format!("Calque {} — {n}", slot + 1)).color(ACCENT),
         None => RichText::new(format!("Calque {} — vide", slot + 1)).color(WEAK),
     };
@@ -154,21 +189,42 @@ fn overlay_ui(ui: &mut egui::Ui, slot: usize, p: &mut Params, name: &Option<Stri
                     .add_filter("Vidéo / image", &["mp4", "mov", "mkv", "webm", "avi", "gif", "png", "m4v"])
                     .pick_file()
                 {
-                    shared.status.lock().unwrap().message = "Chargement de la boucle…".into();
-                    match Clip::load(&f) {
-                        Ok(c) => {
-                            let _ = tx.send(Cmd::SetOverlay { slot, clip: Some(Arc::new(c)) });
-                        }
-                        Err(e) => shared.status.lock().unwrap().message = format!("{e:#}"),
-                    }
+                    *edit = None;
+                    load_overlay(slot, f, None, tx, shared);
                 }
             }
             if name.is_some() && ui.small_button("Retirer").clicked() {
                 let _ = tx.send(Cmd::SetOverlay { slot, clip: None });
             }
         });
-        if name.is_none() {
-            return;
+        let Some(info) = info else { return };
+        // Which part of the file loops.
+        let (mut a, mut b) = edit.unwrap_or((info.start, info.end));
+        let mut release = false;
+        egui::Grid::new(("ovrange", slot)).num_columns(2).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
+            ui.label("Début");
+            let r = ui.add(egui::Slider::new(&mut a, 0.0..=info.duration.max(0.1)).suffix(" s").fixed_decimals(2))
+                .on_hover_text("Où la boucle commence dans le fichier.");
+            release |= r.drag_stopped() || r.lost_focus();
+            if r.changed() {
+                b = b.clamp(a + 0.1, (a + MAX_SECONDS).min(info.duration));
+            }
+            ui.end_row();
+            ui.label("Fin");
+            let hi = (a + MAX_SECONDS).min(info.duration).max(a + 0.1);
+            let r = ui.add(egui::Slider::new(&mut b, (a + 0.1).min(hi)..=hi).suffix(" s").fixed_decimals(2))
+                .on_hover_text(format!("Où la boucle s'arrête. {} s au plus.", MAX_SECONDS));
+            release |= r.drag_stopped() || r.lost_focus();
+            ui.end_row();
+        });
+        ui.label(RichText::new(format!("Boucle de {:.2} s, fichier de {:.1} s", b - a, info.duration)).small().color(WEAK));
+        if (a - info.start).abs() > 1e-3 || (b - info.end).abs() > 1e-3 {
+            *edit = Some((a, b));
+            if release {
+                load_overlay(slot, info.path.clone(), Some((a, b)), tx, shared);
+            }
+        } else {
+            *edit = None;
         }
         let o = &mut p.overlays[slot];
         egui::Grid::new(("ovsel", slot)).num_columns(2).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
@@ -214,7 +270,7 @@ fn tab_button(ui: &mut egui::Ui, tab: &mut Tab, this: Tab, label: &str, w: f32) 
     }
 }
 
-fn image_tab(ui: &mut egui::Ui, p: &mut Params, st: &Status, tx: &Sender<Cmd>, shared: &Shared) {
+fn image_tab(ui: &mut egui::Ui, p: &mut Params, st: &Status, ov_edit: &mut [Option<(f64, f64)>; 3], tx: &Sender<Cmd>, shared: &Arc<Shared>) {
     let sound = st.has_sound;
     card(ui, "Entrée", "Avant le circuit : ce qui entre colore toute la boucle.", |ui| {
         egui::Grid::new("input").num_columns(3).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
@@ -228,7 +284,7 @@ fn image_tab(ui: &mut egui::Ui, p: &mut Params, st: &Status, tx: &Sender<Cmd>, s
     });
     card(ui, "Calques vidéo", "Des boucles vidéo par-dessus l'image. « Dans le circuit » : les effets les abîment aussi.", |ui| {
         for slot in 0..3 {
-            overlay_ui(ui, slot, p, &st.overlays[slot], tx, shared, sound);
+            overlay_ui(ui, slot, p, &st.overlays[slot], &mut ov_edit[slot], tx, shared, sound);
         }
     });
     card(ui, "Amp", "Le boîtier : un enhancer dont la sortie revient à l'entrée, et le mélangeur de synchro.", |ui| {
@@ -477,7 +533,7 @@ impl eframe::App for App {
 
         let tx = self.tx.clone();
         let shared = self.shared.clone();
-        let (tab, sel, drag) = (&mut self.tab, &mut self.sel_band, &mut self.band_drag);
+        let (tab, sel, drag, ov_edit) = (&mut self.tab, &mut self.sel_band, &mut self.band_drag, &mut self.ov_edit);
         let side = egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(14, 12));
         egui::SidePanel::left("knobs").resizable(false).exact_width(480.0).frame(side).show(ctx, |ui| {
             let old = *shared.params.lock().unwrap();
@@ -511,7 +567,7 @@ impl eframe::App for App {
             });
             egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match *tab {
-                    Tab::Image => image_tab(ui, &mut p, &st, &tx, &shared),
+                    Tab::Image => image_tab(ui, &mut p, &st, ov_edit, &tx, &shared),
                     Tab::Camera => camera_tab(ui, &mut p, &st),
                     Tab::Sound => sound_tab(ui, &mut p, &st, sel, drag),
                 });

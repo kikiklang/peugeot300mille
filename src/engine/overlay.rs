@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 
 pub const N_OVERLAYS: usize = 3;
 /// Longest loop kept in memory, and its largest side.
-const MAX_SECONDS: f64 = 20.0;
+pub const MAX_SECONDS: f64 = 20.0;
 const MAX_SIDE: u32 = 384;
 
 pub const PLACES: [&str; 2] = ["Dans le circuit", "Par-dessus"];
@@ -21,24 +21,32 @@ pub const MODES: [&str; 6] = ["Normal", "Écran", "Addition", "Multiplier", "Inc
 pub struct Clip {
     pub path: PathBuf,
     pub name: String,
+    /// The part of the file that loops, in seconds, and the file's length.
+    pub start: f64,
+    pub end: f64,
+    pub duration: f64,
     pub w: usize,
     pub h: usize,
     frames: Vec<Vec<u8>>,
 }
 
 impl Clip {
-    pub fn load(path: &Path) -> Result<Self> {
+    /// The part of the file from `start` to `end` (at most [`MAX_SECONDS`] long).
+    pub fn load_range(path: &Path, start: f64, end: Option<f64>) -> Result<Self> {
         let pr = crate::media::probe(path)?;
+        let duration = if pr.duration > 0.0 { pr.duration } else { MAX_SECONDS };
+        let start = start.clamp(0.0, (duration - 0.05).max(0.0));
+        let end = end.unwrap_or(duration).min(duration).min(start + MAX_SECONDS).max(start + 0.05);
         let (sw, sh) = (pr.width.max(1) as f64, pr.height.max(1) as f64);
         let k = (MAX_SIDE as f64 / sw.max(sh)).min(1.0);
         let w = ((sw * k).round() as usize).max(2) & !1;
         let h = ((sh * k).round() as usize).max(2) & !1;
         let mut child = Command::new("ffmpeg")
-            .args(["-nostdin", "-loglevel", "error", "-i"])
+            .args(["-nostdin", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i"])
             .arg(path)
             .args([
                 "-t",
-                &MAX_SECONDS.to_string(),
+                &format!("{:.3}", end - start),
                 "-an",
                 "-vf",
                 &format!("fps={TV_FPS},scale={w}:{h}:flags=area,format=rgba"),
@@ -61,7 +69,7 @@ impl Clip {
             bail!("{}: no picture could be read", path.display());
         }
         let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Self { path: path.to_path_buf(), name, w, h, frames })
+        Ok(Self { path: path.to_path_buf(), name, start, end, duration, w, h, frames })
     }
 
     fn frame(&self, tv_k: i64, speed: f32) -> &[u8] {

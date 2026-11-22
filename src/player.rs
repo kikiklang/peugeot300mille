@@ -26,6 +26,16 @@ pub enum Cmd {
     SetOverlay { slot: usize, clip: Option<Arc<Clip>> },
 }
 
+/// What the panel shows about a loaded overlay.
+#[derive(Clone)]
+pub struct OverlayInfo {
+    pub name: String,
+    pub path: PathBuf,
+    pub start: f64,
+    pub end: f64,
+    pub duration: f64,
+}
+
 #[derive(Default, Clone)]
 pub struct Status {
     pub file: Option<Probe>,
@@ -40,7 +50,8 @@ pub struct Status {
     pub has_sound: bool,
     pub lut_in: Option<String>,
     pub lut_out: Option<String>,
-    pub overlays: [Option<String>; 3],
+    /// Loaded overlays.
+    pub overlays: [Option<OverlayInfo>; 3],
     pub feat: [f32; N_FEAT],
     /// Spectrum of the sound at the current frame (1/12 octave bins, power).
     pub spectrum: Vec<f32>,
@@ -216,6 +227,7 @@ impl Player {
                     lut_in: self.luts.0.as_ref().map(|l| l.path.display().to_string()),
                     lut_out: self.luts.1.as_ref().map(|l| l.path.display().to_string()),
                     overlays: self.clips.clone().map(|c| c.map(|c| c.path.display().to_string())),
+                    overlay_ranges: self.clips.clone().map(|c| c.map(|c| (c.start, c.end))),
                 });
                 let mut st = self.shared.status.lock().unwrap();
                 st.auto_rec = true;
@@ -229,10 +241,17 @@ impl Player {
             Cmd::RecAuto(false) => self.finish_auto(),
             Cmd::SetOverlay { slot, clip } => {
                 let slot = slot.min(2);
-                self.shared.status.lock().unwrap().overlays[slot] = clip.as_ref().map(|c| c.name.clone());
+                self.shared.status.lock().unwrap().overlays[slot] = clip.as_ref().map(|c| OverlayInfo {
+                    name: c.name.clone(),
+                    path: c.path.clone(),
+                    start: c.start,
+                    end: c.end,
+                    duration: c.duration,
+                });
                 self.clips[slot] = clip;
                 if let Some(a) = self.auto.as_mut() {
                     a.overlays = self.clips.clone().map(|c| c.map(|c| c.path.display().to_string()));
+                    a.overlay_ranges = self.clips.clone().map(|c| c.map(|c| (c.start, c.end)));
                 }
                 if let Some(r) = self.run.as_mut() {
                     r.engine.overlays = self.clips.clone();

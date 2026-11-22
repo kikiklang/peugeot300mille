@@ -72,9 +72,15 @@ fn cli_render(args: &[String]) -> Result<()> {
     };
     let luts = (load(&lut_in)?, load(&lut_out)?);
     let mut clips: [Option<std::sync::Arc<engine::overlay::Clip>>; 3] = [None, None, None];
-    for (c, p) in clips.iter_mut().zip(&ov) {
+    // A file can be followed by @start-end in seconds: boucle.mp4@2.5-8
+    for (i, (c, p)) in clips.iter_mut().zip(&ov).enumerate() {
         if let Some(p) = p {
-            *c = Some(std::sync::Arc::new(engine::overlay::Clip::load(std::path::Path::new(p))?));
+            let (path, range) = match p.rsplit_once('@') {
+                Some((f, r)) if r.contains('-') => (f.to_string(), r.split_once('-').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))),
+                _ => (p.clone(), auto.as_ref().and_then(|a| a.overlay_ranges[i])),
+            };
+            let (s, e) = range.map_or((0.0, None), |(s, e): (f64, f64)| (s, Some(e)));
+            *c = Some(std::sync::Arc::new(engine::overlay::Clip::load_range(std::path::Path::new(&path), s, e)?));
         }
     }
     let knobs = match &auto {
