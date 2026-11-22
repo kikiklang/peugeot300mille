@@ -52,7 +52,7 @@ pub const DEFAULT_BANDS: [Band; 4] = [
 pub const BAND_HINTS: [&str; 4] = ["kick", "caisse claire", "voix", "hi-hat"];
 
 /// Number of knobs the sound can drive.
-pub const N_KNOBS: usize = 28;
+pub const N_KNOBS: usize = 29;
 
 /// The knobs of the box. Every control starts at 0, which is a clean pass through the circuit.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -78,6 +78,7 @@ pub struct Params {
     pub vhs_tracking: f32,
     pub vhs_dropouts: f32,
     pub vhs_jitter: f32,
+    pub vhs_streaks: f32,
     // Camera loop.
     pub mix: f32,
     pub blur: f32,
@@ -136,6 +137,7 @@ impl Default for Params {
             vhs_tracking: 0.0,
             vhs_dropouts: 0.0,
             vhs_jitter: 0.0,
+            vhs_streaks: 0.0,
             mix: 0.0,
             blur: 0.0,
             color: 0.0,
@@ -206,6 +208,7 @@ pub const KNOBS: [(&str, f32, f32); N_KNOBS] = [
     ("lens_vignette", 0.0, 1.0),
     ("lens_ca", 0.0, 1.0),
     ("lens_moire", 0.0, 1.0),
+    ("vhs_streaks", 0.0, 1.0),
 ];
 
 pub fn knob_index(name: &str) -> usize {
@@ -299,9 +302,10 @@ pub const AMP_KNOBS: [(&str, &str, &str); 5] = [
     ("sync", "Sync", "Sync mixer: locked → rolling → lifting to white → white with grain → snow → sinking to black. 0 = out."),
 ];
 
-pub const VHS_KNOBS: [(&str, &str, &str); 4] = [
+pub const VHS_KNOBS: [(&str, &str, &str); 5] = [
     ("vhs_wear", "Usure", "Bande fatiguée : image moins nette, couleur qui bave et traîne derrière, teinte qui frémit, souffle."),
-    ("vhs_tracking", "Tracking", "Réglage de piste raté : une bande de neige qui défile ; la télé peut y perdre la synchro."),
+    ("vhs_tracking", "Tracking", "Réglage de piste raté : une bande où l'image glisse, perd sa couleur et se déchire."),
+    ("vhs_streaks", "Traits", "Les traits blancs qui défilent dans la bande de tracking."),
     ("vhs_dropouts", "Drop-outs", "Manques d'oxyde : traits blancs, ou ligne du dessus répétée."),
     ("vhs_jitter", "Instabilité", "Lignes qui tremblent, haut de l'image qui ondule, commutation des têtes visible en bas."),
 ];
@@ -331,6 +335,7 @@ impl Params {
             "vhs_tracking" => &mut self.vhs_tracking,
             "vhs_dropouts" => &mut self.vhs_dropouts,
             "vhs_jitter" => &mut self.vhs_jitter,
+            "vhs_streaks" => &mut self.vhs_streaks,
             "mix" => &mut self.mix,
             "blur" => &mut self.blur,
             "color" => &mut self.color,

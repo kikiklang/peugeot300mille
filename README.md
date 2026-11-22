@@ -44,7 +44,7 @@ police est installée.
   **LUT `.cube`** (color.io, Resolve, Kdenlive…) avec son dosage. Ce qui entre colore toute la
   boucle.
 - **📼 Magnétoscope VHS** (entre le boîtier et la télé, sur le signal composite) : Usure
-  (couleur qui bave et traîne, luma moins nette, souffle), Tracking (bande de neige qui défile),
+  (couleur qui bave et traîne, luma moins nette, souffle), Tracking (bande où l'image glisse et se déchire), Traits (les traits blancs qui défilent dans la bande),
   Drop-outs (traits blancs, ligne répétée), Instabilité (lignes qui tremblent, haut qui ondule,
   commutation des têtes). Tous pilotables par le son.
 - **🎥 Caméra** (sous Video Feedback, ne compte que si Mix > 0, tout est coupé à 0) :

@@ -17,6 +17,7 @@ pub struct Vhs {
     i: Vec<f32>,
     q: Vec<f32>,
     jitter: f32,
+    slip: f32,
     hue: f32,
     band: f32,
     frame: u32,
@@ -31,6 +32,7 @@ impl Vhs {
             i: vec![0.0; SPL],
             q: vec![0.0; SPL],
             jitter: 0.0,
+            slip: 0.0,
             hue: 0.0,
             band: 0.3,
             frame: 0,
@@ -38,7 +40,7 @@ impl Vhs {
     }
 
     pub fn active(p: &Params) -> bool {
-        p.vhs_wear > 0.0 || p.vhs_tracking > 0.0 || p.vhs_dropouts > 0.0 || p.vhs_jitter > 0.0
+        p.vhs_wear > 0.0 || p.vhs_tracking > 0.0 || p.vhs_dropouts > 0.0 || p.vhs_jitter > 0.0 || p.vhs_streaks > 0.0
     }
 
     /// `abs0` is the absolute index of the frame's first sample (keeps the subcarrier phase).
@@ -48,14 +50,15 @@ impl Vhs {
         let trk = p.vhs_tracking;
         let drop = p.vhs_dropouts;
         let inst = p.vhs_jitter;
+        let streaks = p.vhs_streaks;
         let mut rng = Rng(0x2545_f491 ^ self.frame.wrapping_mul(0x9e37_79b9) | 1);
 
         let a_y = rc(3.4e6 * (1.8 / 3.4f64).powf(wear as f64)); // luma bandwidth
         let a_c = rc(1.0e6 * (0.3 / 1.0f64).powf(wear as f64)); // colour-under bandwidth
         let y_noise = 0.004 + 0.05 * wear;
         // Tracking band drifts slowly; its height grows with the error.
-        self.band = (self.band + 0.004 + 0.01 * trk).fract();
-        let band_h = 5.0 + 32.0 * trk;
+        self.band = (self.band + 0.004 + 0.01 * trk.max(streaks)).fract();
+        let band_h = 5.0 + 32.0 * trk.max(streaks);
         let band_c = self.band * LINES as f32;
 
         for l in 0..LINES {
@@ -116,11 +119,34 @@ impl Vhs {
                 shift(&mut self.line, &mut self.y, dx);
             }
 
-            // --- Tracking noise band (wraps round the frame).
+            // --- Tracking band (wraps round the frame): the heads leave the track, so lines slip
+            // sideways, colour is lost and sync weakens (the TV tears there). The white streaks
+            // that run through the band are a separate knob.
             let mut d = (l as f32 - band_c).abs();
             d = d.min(LINES as f32 - d);
-            if trk > 0.0 && d < band_h {
-                let strength = 0.8 * trk.powf(1.8) * (1.0 - d / band_h);
+            let in_band = (trk > 0.0 || streaks > 0.0) && d < band_h;
+            if in_band && trk > 0.0 {
+                let strength = (trk.powf(0.9) * (1.3 - d / band_h)).min(1.0);
+                // Colour gone: back to luma only.
+                for (v, y) in self.line.iter_mut().zip(&self.y) {
+                    *v += (*y - *v) * strength;
+                }
+                // Sideways slip.
+                self.slip += (rng.tri() * 110.0 - self.slip) * 0.35;
+                shift(&mut self.line, &mut self.i, self.slip * strength);
+                // Weak sync and a washed, lifted picture.
+                // Sync mostly gone where the heads are off the track.
+                let lose_sync = rng.unit() < strength * 0.9;
+                for v in self.line.iter_mut() {
+                    if *v < BLANK {
+                        *v += (BLANK - *v) * if lose_sync { 1.0 } else { strength * 0.6 };
+                    } else {
+                        *v += (BLACK + 0.25 - *v) * strength * 0.35;
+                    }
+                }
+            }
+            if in_band && streaks > 0.0 {
+                let strength = 0.8 * streaks.powf(1.5) * (1.0 - d / band_h);
                 let mut k = 0;
                 while k < SPL {
                     let run = 4 + (rng.unit() * 60.0) as usize;
@@ -133,7 +159,7 @@ impl Vhs {
                     k += run;
                 }
             }
-            if near_switch && trk > 0.3 {
+            if near_switch && streaks > 0.3 {
                 for v in self.line[..SPL / 3].iter_mut() {
                     *v = BLACK + 0.3 + rng.tri() * 0.3 * trk;
                 }
