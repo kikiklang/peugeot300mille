@@ -1,4 +1,4 @@
-# glitchbox v0.6
+# glitchbox v0.7
 
 Boîte de glitch vidéo analogique pour Linux. La vidéo passe par un **vrai signal composite NTSC
 simulé** (910 échantillons × 525 lignes à 4×fsc) et traverse un ampli vidéo avec feedback, un
@@ -43,6 +43,11 @@ police est installée.
 - **🎨 Entrée** (avant le circuit) : luminosité, contraste, gamma, saturation, teinte, et une
   **LUT `.cube`** (color.io, Resolve, Kdenlive…) avec son dosage. Ce qui entre colore toute la
   boucle.
+- **Calques vidéo** (onglet Image) : jusqu'à 3 boucles vidéo par-dessus l'image, chacune avec
+  Placement (« Dans le circuit » : les effets l'abîment aussi ; « Par-dessus » : intact), Mode
+  (Normal, Écran, Addition, Multiplier, Incrustation du noir / du blanc pour les boucles VJ),
+  Opacité, Taille, Position, Vitesse. Opacité et Taille sont pilotables par le son. Les 20
+  premières secondes de chaque boucle sont gardées en mémoire.
 - **📼 Magnétoscope VHS** (entre le boîtier et la télé, sur le signal composite) : Usure
   (couleur qui bave et traîne, luma moins nette, souffle), Tracking (bande où l'image glisse et se déchire), Traits (les traits blancs qui défilent dans la bande),
   Drop-outs (traits blancs, ligne répétée), Instabilité (lignes qui tremblent, haut qui ondule,
@@ -71,7 +76,7 @@ police est installée.
 ```sh
 glitchbox render IN.mp4 OUT.mp4 --params reglage.json [--start 12.5] [--frames 300]
 glitchbox render IN.mp4 OUT.mp4 --automation sortie.automation.json
-glitchbox render IN.mp4 OUT.mp4 --params r.json --lut-in look.cube --lut-out film.cube
+glitchbox render IN.mp4 OUT.mp4 --params r.json --lut-in look.cube --lut-out film.cube --overlay1 boucle.mp4
 ```
 
 ## Comment ça marche

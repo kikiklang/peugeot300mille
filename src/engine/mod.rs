@@ -9,6 +9,7 @@ pub mod camera;
 pub mod encoder;
 pub mod input;
 pub mod lut;
+pub mod overlay;
 pub mod signal;
 pub mod syncmix;
 pub mod tv;
@@ -29,6 +30,11 @@ pub struct Engine {
     pub lut_out: Option<Arc<lut::Lut>>,
     lut_out_amount: f32,
     out_rgb: Vec<f32>,
+    /// Video loops laid over the picture.
+    pub overlays: [Option<Arc<overlay::Clip>>; overlay::N_OVERLAYS],
+    /// The TV frame on the timeline (set by the runner), which drives the loops.
+    pub tv_k: i64,
+    last_p: Params,
     frame: u64,
     rgb: Vec<f32>,
     y: Vec<f32>,
@@ -53,6 +59,9 @@ impl Engine {
             lut_out: None,
             lut_out_amount: 1.0,
             out_rgb: vec![0.0; W * H * 3],
+            overlays: [None, None, None],
+            tv_k: 0,
+            last_p: Params::default(),
             frame: 0,
             rgb: vec![0.0; W * H * 3],
             y: vec![0.0; W * H],
@@ -80,7 +89,9 @@ impl Engine {
             *d = *s as f32 * (1.0 / 255.0);
         }
         input::process(&mut self.rgb, &p, self.lut_in.as_deref());
+        overlay::composite(&mut self.rgb, &self.overlays, &p, 0, self.tv_k);
         self.lut_out_amount = p.lut_out_amount;
+        self.last_p = p;
         if p.mix > 0.0 {
             self.cam.film_and_mix(&self.tv.raster, &mut self.rgb, &p);
         }
@@ -104,15 +115,22 @@ impl Engine {
 
     /// The screen as RGB8, 768 × 480.
     pub fn screen_rgb8(&mut self, out: &mut [u8]) {
-        let src = match &self.lut_out {
-            Some(l) if self.lut_out_amount > 0.0 => {
-                for (d, s) in self.out_rgb.iter_mut().zip(&self.tv.raster) {
-                    *d = s.clamp(0.0, 1.0);
-                }
-                input::apply_lut(&mut self.out_rgb, l, self.lut_out_amount);
-                &self.out_rgb
+        let p = self.last_p;
+        let on_top = self.overlays.iter().zip(&p.overlays).any(|(c, o)| c.is_some() && o.place == 1);
+        let lut = self.lut_out.as_ref().filter(|_| self.lut_out_amount > 0.0);
+        let src = if on_top || lut.is_some() {
+            for (d, s) in self.out_rgb.iter_mut().zip(&self.tv.raster) {
+                *d = s.clamp(0.0, 1.0);
             }
-            _ => &self.tv.raster,
+            if on_top {
+                overlay::composite(&mut self.out_rgb, &self.overlays, &p, 1, self.tv_k);
+            }
+            if let Some(l) = lut {
+                input::apply_lut(&mut self.out_rgb, l, self.lut_out_amount);
+            }
+            &self.out_rgb
+        } else {
+            &self.tv.raster
         };
         for (d, s) in out.iter_mut().zip(src) {
             *d = (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;

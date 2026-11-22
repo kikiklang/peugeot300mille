@@ -96,6 +96,7 @@ impl Runner {
             }
             None => *p,
         };
+        self.engine.tv_k = self.tv_k;
         self.engine.step(&self.src, &p);
         self.tv_k += 1;
         Ok(true)
@@ -154,6 +155,9 @@ pub struct Automation {
     pub lut_in: Option<String>,
     #[serde(default)]
     pub lut_out: Option<String>,
+    /// Overlay files in use while recording.
+    #[serde(default)]
+    pub overlays: [Option<String>; 3],
 }
 
 impl Automation {

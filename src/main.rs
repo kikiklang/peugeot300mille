@@ -41,6 +41,7 @@ fn cli_render(args: &[String]) -> Result<()> {
     let mut frames = None;
     let mut lut_in: Option<String> = None;
     let mut lut_out: Option<String> = None;
+    let mut ov: [Option<String>; 3] = [None, None, None];
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().context("missing value");
@@ -51,17 +52,31 @@ fn cli_render(args: &[String]) -> Result<()> {
             "--frames" => frames = Some(val()?.parse()?),
             "--lut-in" => lut_in = Some(val()?),
             "--lut-out" => lut_out = Some(val()?),
+            "--overlay1" => ov[0] = Some(val()?),
+            "--overlay2" => ov[1] = Some(val()?),
+            "--overlay3" => ov[2] = Some(val()?),
             other => bail!("unknown option {other}"),
         }
     }
     if let Some(a) = &auto {
         lut_in = lut_in.or_else(|| a.lut_in.clone());
         lut_out = lut_out.or_else(|| a.lut_out.clone());
+        for (o, ao) in ov.iter_mut().zip(&a.overlays) {
+            if o.is_none() {
+                *o = ao.clone();
+            }
+        }
     }
     let load = |p: &Option<String>| -> Result<Option<std::sync::Arc<engine::lut::Lut>>> {
         p.as_ref().map(|p| engine::lut::Lut::load(std::path::Path::new(p)).map(std::sync::Arc::new)).transpose()
     };
     let luts = (load(&lut_in)?, load(&lut_out)?);
+    let mut clips: [Option<std::sync::Arc<engine::overlay::Clip>>; 3] = [None, None, None];
+    for (c, p) in clips.iter_mut().zip(&ov) {
+        if let Some(p) = p {
+            *c = Some(std::sync::Arc::new(engine::overlay::Clip::load(std::path::Path::new(p))?));
+        }
+    }
     let knobs = match &auto {
         Some(a) => {
             start = a.start;
@@ -72,7 +87,7 @@ fn cli_render(args: &[String]) -> Result<()> {
     let cancel = AtomicBool::new(false);
     let t0 = std::time::Instant::now();
     let mut last = 0.0;
-    render::render(&input, &output, knobs, start, frames, luts, &cancel, &mut |d, n| {
+    render::render(&input, &output, knobs, start, frames, luts, clips, &cancel, &mut |d, n| {
         let el = t0.elapsed().as_secs_f64();
         if el - last > 1.0 || d == n {
             last = el;

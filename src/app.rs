@@ -1,7 +1,7 @@
 //! The desktop window.
 
 use crate::audio::{bin_freq, freq_bin, N_BANDS, N_GLOBAL, SOURCES, SPEC_BINS};
-use crate::engine::lut::Lut;
+use crate::engine::{lut::Lut, overlay::{Clip, MODES, PLACES}};
 use crate::params::{Band, Params, AMP_KNOBS, BAND_HINTS, CAMERAS, CAM_GROUPS, CAM_KNOBS, INPUT_KNOBS, KNOBS, MIRRORS, SOUND_PRESETS, VHS_KNOBS};
 use crate::player::{self, Cmd, Shared, Status};
 use crate::render::{render, Knobs};
@@ -97,7 +97,8 @@ impl App {
             let input = PathBuf::from(&auto.source);
             let load = |p: &Option<String>| p.as_ref().and_then(|p| Lut::load(std::path::Path::new(p)).ok().map(Arc::new));
             let luts = (load(&auto.lut_in), load(&auto.lut_out));
-            let r = render(&input, &out, Knobs::Recorded(&auto), auto.start, None, luts, &cancel, &mut |d, n| {
+            let clips = auto.overlays.clone().map(|p| p.and_then(|p| Clip::load(std::path::Path::new(&p)).ok().map(Arc::new)));
+            let r = render(&input, &out, Knobs::Recorded(&auto), auto.start, None, luts, clips, &cancel, &mut |d, n| {
                 *progress.lock().unwrap() = (d, n);
             });
             *result.lock().unwrap() = Some(r.map(|_| out).map_err(|e| format!("{e:#}")));
@@ -141,6 +142,69 @@ fn lut_ui(ui: &mut egui::Ui, output: bool, name: &Option<String>, amount: &mut f
     }
 }
 
+fn overlay_ui(ui: &mut egui::Ui, slot: usize, p: &mut Params, name: &Option<String>, tx: &Sender<Cmd>, shared: &Shared, sound: bool) {
+    let title = match name {
+        Some(n) => RichText::new(format!("Calque {} — {n}", slot + 1)).color(ACCENT),
+        None => RichText::new(format!("Calque {} — vide", slot + 1)).color(WEAK),
+    };
+    egui::CollapsingHeader::new(title).id_salt(("overlay", slot)).default_open(name.is_some()).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            if ui.button(if name.is_some() { "Changer…" } else { "Charger une boucle…" }).clicked() {
+                if let Some(f) = rfd::FileDialog::new()
+                    .add_filter("Vidéo / image", &["mp4", "mov", "mkv", "webm", "avi", "gif", "png", "m4v"])
+                    .pick_file()
+                {
+                    shared.status.lock().unwrap().message = "Chargement de la boucle…".into();
+                    match Clip::load(&f) {
+                        Ok(c) => {
+                            let _ = tx.send(Cmd::SetOverlay { slot, clip: Some(Arc::new(c)) });
+                        }
+                        Err(e) => shared.status.lock().unwrap().message = format!("{e:#}"),
+                    }
+                }
+            }
+            if name.is_some() && ui.small_button("Retirer").clicked() {
+                let _ = tx.send(Cmd::SetOverlay { slot, clip: None });
+            }
+        });
+        if name.is_none() {
+            return;
+        }
+        let o = &mut p.overlays[slot];
+        egui::Grid::new(("ovsel", slot)).num_columns(2).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
+            ui.label("Placement");
+            egui::ComboBox::from_id_salt(("ovplace", slot)).selected_text(PLACES[o.place as usize]).show_ui(ui, |ui| {
+                ui.selectable_value(&mut o.place, 0, PLACES[0]).on_hover_text("Avant le circuit : ampli, VHS, télé et caméra l'abîment aussi.");
+                ui.selectable_value(&mut o.place, 1, PLACES[1]).on_hover_text("Par-dessus l'image finie, intact.");
+            });
+            ui.end_row();
+            ui.label("Mode");
+            egui::ComboBox::from_id_salt(("ovmode", slot)).selected_text(MODES[o.mode as usize]).show_ui(ui, |ui| {
+                for (i, m) in MODES.iter().enumerate() {
+                    ui.selectable_value(&mut o.mode, i as u8, *m);
+                }
+            })
+            .response
+            .on_hover_text("Incrustation du noir : le fond noir d'une boucle VJ disparaît.");
+            ui.end_row();
+        });
+        let n = slot + 1;
+        let rows: [(String, &str, &str); 5] = [
+            (format!("ov{n}_opacity"), "Opacité", "Transparence du calque."),
+            (format!("ov{n}_size"), "Taille", "Hauteur du calque par rapport à l'image."),
+            (format!("ov{n}_x"), "Position X", "Gauche (-1) à droite (+1)."),
+            (format!("ov{n}_y"), "Position Y", "Bas (-1) à haut (+1)."),
+            (format!("ov{n}_speed"), "Vitesse", "Vitesse de lecture de la boucle (négatif = à l'envers)."),
+        ];
+        egui::Grid::new(("ovknobs", slot)).num_columns(3).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
+            for (name, label, help) in &rows {
+                ui::knob_row(ui, p, name, label, help, sound);
+                ui.end_row();
+            }
+        });
+    });
+}
+
 fn tab_button(ui: &mut egui::Ui, tab: &mut Tab, this: Tab, label: &str, w: f32) {
     let sel = *tab == this;
     let text = RichText::new(label).size(15.0).color(if sel { egui::Color32::BLACK } else { ui::TEXT });
@@ -161,6 +225,11 @@ fn image_tab(ui: &mut egui::Ui, p: &mut Params, st: &Status, tx: &Sender<Cmd>, s
         });
         ui.add_space(4.0);
         lut_ui(ui, false, &st.lut_in, &mut p.lut_in_amount, tx, shared);
+    });
+    card(ui, "Calques vidéo", "Des boucles vidéo par-dessus l'image. « Dans le circuit » : les effets les abîment aussi.", |ui| {
+        for slot in 0..3 {
+            overlay_ui(ui, slot, p, &st.overlays[slot], tx, shared, sound);
+        }
     });
     card(ui, "Amp", "Le boîtier : un enhancer dont la sortie revient à l'entrée, et le mélangeur de synchro.", |ui| {
         knob_grid(ui, "amp", p, &AMP_KNOBS, sound);

@@ -123,6 +123,14 @@ fn range_of(name: &str) -> (f32, f32) {
     if let Some(k) = KNOBS.iter().find(|k| k.0 == name) {
         return (k.1, k.2);
     }
+    if name.starts_with("ov") {
+        if name.ends_with("_x") || name.ends_with("_y") {
+            return (-1.0, 1.0);
+        }
+        if name.ends_with("_speed") {
+            return (-4.0, 4.0);
+        }
+    }
     if let Some(k) = INPUT_KNOBS.iter().find(|k| k.0 == name) {
         return (k.3, k.4);
     }
@@ -202,5 +210,11 @@ pub fn knob_label(name: &str) -> String {
         .chain(CAM_KNOBS.iter())
         .chain(CAM_GROUPS.iter().flat_map(|g| g.1.iter()))
         .find(|k| k.0 == name)
-        .map_or(name.to_string(), |k| k.1.to_string())
+        .map_or_else(
+            || match name.strip_prefix("ov") {
+                Some(r) => format!("Calque {} · {}", &r[..1], if r.ends_with("opacity") { "Opacité" } else { "Taille" }),
+                None => name.to_string(),
+            },
+            |k| k.1.to_string(),
+        )
 }

@@ -2,7 +2,7 @@
 //! preview slows down instead), so what you see is exactly what gets recorded.
 
 use crate::audio::{Output, Sound, N_FEAT};
-use crate::engine::{lut::Lut, Engine};
+use crate::engine::{lut::Lut, overlay::Clip, Engine};
 use crate::media::{probe, Encoder, Probe};
 use crate::params::Params;
 use crate::runner::{Automation, Runner};
@@ -22,6 +22,8 @@ pub enum Cmd {
     RecAuto(bool),
     /// Sets (or removes) the input or output LUT.
     SetLut { output: bool, lut: Option<Arc<Lut>> },
+    /// Sets (or removes) the video loop of an overlay slot.
+    SetOverlay { slot: usize, clip: Option<Arc<Clip>> },
 }
 
 #[derive(Default, Clone)]
@@ -38,6 +40,7 @@ pub struct Status {
     pub has_sound: bool,
     pub lut_in: Option<String>,
     pub lut_out: Option<String>,
+    pub overlays: [Option<String>; 3],
     pub feat: [f32; N_FEAT],
     /// Spectrum of the sound at the current frame (1/12 octave bins, power).
     pub spectrum: Vec<f32>,
@@ -72,6 +75,7 @@ pub fn spawn(shared: Arc<Shared>, rx: Receiver<Cmd>, repaint: impl Fn() + Send +
                 sound: None,
                 out: None,
                 luts: (None, None),
+                clips: [None, None, None],
                 playing: false,
                 live: None,
                 auto: None,
@@ -93,6 +97,7 @@ struct Player {
     sound: Option<Arc<Sound>>,
     out: Option<Output>,
     luts: (Option<Arc<Lut>>, Option<Arc<Lut>>),
+    clips: [Option<Arc<Clip>>; 3],
     playing: bool,
     live: Option<Encoder>,
     auto: Option<Automation>,
@@ -210,6 +215,7 @@ impl Player {
                     frames: Vec::new(),
                     lut_in: self.luts.0.as_ref().map(|l| l.path.display().to_string()),
                     lut_out: self.luts.1.as_ref().map(|l| l.path.display().to_string()),
+                    overlays: self.clips.clone().map(|c| c.map(|c| c.path.display().to_string())),
                 });
                 let mut st = self.shared.status.lock().unwrap();
                 st.auto_rec = true;
@@ -221,6 +227,23 @@ impl Player {
                 self.play_t0 = None;
             }
             Cmd::RecAuto(false) => self.finish_auto(),
+            Cmd::SetOverlay { slot, clip } => {
+                let slot = slot.min(2);
+                self.shared.status.lock().unwrap().overlays[slot] = clip.as_ref().map(|c| c.name.clone());
+                self.clips[slot] = clip;
+                if let Some(a) = self.auto.as_mut() {
+                    a.overlays = self.clips.clone().map(|c| c.map(|c| c.path.display().to_string()));
+                }
+                if let Some(r) = self.run.as_mut() {
+                    r.engine.overlays = self.clips.clone();
+                }
+                if !self.playing {
+                    if let Some(r) = self.run.as_ref() {
+                        let (pr, t) = (r.probe.clone(), r.time());
+                        self.restart(pr, t);
+                    }
+                }
+            }
             Cmd::SetLut { output, lut } => {
                 let name = lut.as_ref().map(|l| l.title.clone());
                 {
@@ -255,6 +278,7 @@ impl Player {
         let p = self.params();
         let mut engine = self.run.take().map(|r| r.engine).unwrap_or_else(Engine::new);
         (engine.lut_in, engine.lut_out) = self.luts.clone();
+        engine.overlays = self.clips.clone();
         if let Some(o) = &self.out {
             o.clear();
         }
@@ -457,6 +481,7 @@ mod tests {
             auto.start,
             None,
             (None, None),
+            [None, None, None],
             &cancel,
             &mut |_, _| {},
         )

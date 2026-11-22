@@ -1,4 +1,4 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A knob driven by the sound: `source` indexes [`crate::audio::SOURCES`] (0 = none),
 /// `depth` in -1..1 is how far the sound pushes the knob.
@@ -51,8 +51,32 @@ pub const DEFAULT_BANDS: [Band; 4] = [
 ];
 pub const BAND_HINTS: [&str; 4] = ["kick", "caisse claire", "voix", "hi-hat"];
 
+/// One video loop laid over the picture (the file itself is chosen separately).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Overlay {
+    pub opacity: f32,
+    /// Height as a fraction of the picture.
+    pub size: f32,
+    /// Centre, -1..1.
+    pub x: f32,
+    pub y: f32,
+    /// Playback speed (negative = backwards).
+    pub speed: f32,
+    /// Index into overlay::MODES.
+    pub mode: u8,
+    /// 0 = in the circuit (affected by every effect), 1 = on top of the finished picture.
+    pub place: u8,
+}
+
+impl Default for Overlay {
+    fn default() -> Self {
+        Self { opacity: 1.0, size: 0.5, x: 0.0, y: 0.0, speed: 1.0, mode: 0, place: 0 }
+    }
+}
+
 /// Number of knobs the sound can drive.
-pub const N_KNOBS: usize = 29;
+pub const N_KNOBS: usize = 35;
 
 /// The knobs of the box. Every control starts at 0, which is a clean pass through the circuit.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -111,8 +135,10 @@ pub struct Params {
     /// How much of the output LUT is applied (0..1).
     pub lut_out_amount: f32,
     /// How each knob follows the sound, in [`KNOBS`] order.
-    #[serde(deserialize_with = "lenient_mods")]
+    #[serde(deserialize_with = "lenient_mods", serialize_with = "mods_as_list")]
     pub mods: [Mod; N_KNOBS],
+    /// The three overlay slots.
+    pub overlays: [Overlay; 3],
     /// Overall strength of the sound's influence (0..2).
     pub sound_amount: f32,
     /// The four user frequency bands.
@@ -161,10 +187,15 @@ impl Default for Params {
             mirror: 0,
             lut_out_amount: 1.0,
             mods: [Mod::default(); N_KNOBS],
+            overlays: [Overlay::default(); 3],
             sound_amount: 1.0,
             bands: DEFAULT_BANDS,
         }
     }
+}
+
+fn mods_as_list<S: Serializer>(m: &[Mod; N_KNOBS], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(m.iter())
 }
 
 /// Older saved settings have fewer entries: missing ones are "not driven".
@@ -209,6 +240,12 @@ pub const KNOBS: [(&str, f32, f32); N_KNOBS] = [
     ("lens_ca", 0.0, 1.0),
     ("lens_moire", 0.0, 1.0),
     ("vhs_streaks", 0.0, 1.0),
+    ("ov1_opacity", 0.0, 1.0),
+    ("ov1_size", 0.0, 1.0),
+    ("ov2_opacity", 0.0, 1.0),
+    ("ov2_size", 0.0, 1.0),
+    ("ov3_opacity", 0.0, 1.0),
+    ("ov3_size", 0.0, 1.0),
 ];
 
 pub fn knob_index(name: &str) -> usize {
@@ -356,6 +393,18 @@ impl Params {
             "lens_vignette" => &mut self.lens_vignette,
             "lens_ca" => &mut self.lens_ca,
             "lens_moire" => &mut self.lens_moire,
+            n if n.starts_with("ov") && n.len() > 4 => {
+                let i = (n.as_bytes()[2] - b'1') as usize;
+                let o = &mut self.overlays[i.min(2)];
+                match &n[4..] {
+                    "opacity" => &mut o.opacity,
+                    "size" => &mut o.size,
+                    "x" => &mut o.x,
+                    "y" => &mut o.y,
+                    "speed" => &mut o.speed,
+                    _ => panic!("unknown knob {name}"),
+                }
+            }
             _ => panic!("unknown knob {name}"),
         }
     }
@@ -387,6 +436,15 @@ impl Params {
             *v = v.clamp(lo, hi);
         }
         self.mirror = self.mirror.min(MIRRORS.len() as u8 - 1);
+        for o in self.overlays.iter_mut() {
+            o.opacity = o.opacity.clamp(0.0, 1.0);
+            o.size = o.size.clamp(0.0, 1.0);
+            o.x = o.x.clamp(-1.0, 1.0);
+            o.y = o.y.clamp(-1.0, 1.0);
+            o.speed = o.speed.clamp(-4.0, 4.0);
+            o.mode = o.mode.min(crate::engine::overlay::MODES.len() as u8 - 1);
+            o.place = o.place.min(1);
+        }
         for (name, _, _, lo, hi) in INPUT_KNOBS {
             let v = self.knob_mut(name);
             *v = v.clamp(lo, hi);
