@@ -15,7 +15,49 @@ pub const MAX_SECONDS: f64 = 20.0;
 const MAX_SIDE: u32 = 384;
 
 pub const PLACES: [&str; 2] = ["Dans le circuit", "Par-dessus"];
-pub const MODES: [&str; 6] = ["Normal", "Écran", "Addition", "Multiplier", "Incrustation du noir", "Incrustation du blanc"];
+/// Blend modes. New ones are added at the end so saved settings keep their mode.
+pub const MODES: [&str; 18] = [
+    "Normal",
+    "Écran",
+    "Addition",
+    "Multiplier",
+    "Incrustation du noir",
+    "Incrustation du blanc",
+    "Soustraction",
+    "Différence",
+    "Superposition",
+    "Lumière douce",
+    "Lumière forte",
+    "Éclaircir",
+    "Assombrir",
+    "Densité couleur −",
+    "Densité couleur +",
+    "Couleur",
+    "Luminosité",
+    "Incrustation du vert",
+];
+
+/// Help shown for each mode.
+pub const MODE_HELP: [&str; 18] = [
+    "La boucle recouvre l'image.",
+    "Éclaircit : le noir de la boucle disparaît, le reste s'ajoute en douceur.",
+    "Additionne la lumière : flashs, néons, particules.",
+    "Assombrit : le blanc de la boucle disparaît.",
+    "Le fond noir d'une boucle VJ disparaît (l'image garde ses couleurs).",
+    "Le fond blanc disparaît.",
+    "Retire la lumière de la boucle à l'image.",
+    "Écart entre les deux : couleurs inversées là où la boucle est claire.",
+    "Contraste : renforce les clairs et les sombres de l'image avec la boucle.",
+    "Comme Superposition, en plus doux.",
+    "Comme Superposition, en plus dur (c'est la boucle qui décide).",
+    "Garde le plus clair des deux, couleur par couleur.",
+    "Garde le plus sombre des deux.",
+    "Éclaircit fortement là où la boucle est claire (brûlé).",
+    "Assombrit fortement là où la boucle est sombre.",
+    "Prend la couleur de la boucle, garde la lumière de l'image.",
+    "Prend la lumière de la boucle, garde la couleur de l'image.",
+    "Le fond vert (chroma key) disparaît.",
+];
 
 /// A short clip, decoded once at the TV's frame rate, RGBA.
 pub struct Clip {
@@ -115,24 +157,61 @@ pub fn composite(rgb: &mut [f32], clips: &[Option<std::sync::Arc<Clip>>; N_OVERL
                 match mode {
                     4 => a *= smooth(0.04, 0.18, lum),
                     5 => a *= 1.0 - smooth(0.82, 0.96, lum),
+                    17 => {
+                        // Green screen: how much greener than red and blue.
+                        let g = px[1] - px[0].max(px[2]);
+                        a *= 1.0 - smooth(0.08, 0.25, g);
+                    }
                     _ => {}
                 }
                 if a <= 0.0 {
                     continue;
                 }
+                let base = [row[3 * x], row[3 * x + 1], row[3 * x + 2]];
+                let blended: [f32; 3] = match mode {
+                    15 | 16 => {
+                        // Colour / luminosity: swap the light and the colour in YIQ.
+                        let yiq = |c: [f32; 3]| {
+                            (
+                                0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2],
+                                0.596 * c[0] - 0.274 * c[1] - 0.322 * c[2],
+                                0.211 * c[0] - 0.523 * c[1] + 0.312 * c[2],
+                            )
+                        };
+                        let (yb, ib, qb) = yiq(base);
+                        let (yo, io, qo) = yiq([px[0], px[1], px[2]]);
+                        let (y, i, q) = if mode == 15 { (yb, io, qo) } else { (yo, ib, qb) };
+                        [y + 0.956 * i + 0.621 * q, y - 0.272 * i - 0.647 * q, y - 1.106 * i + 1.703 * q]
+                    }
+                    _ => std::array::from_fn(|c| blend(mode, base[c], px[c])),
+                };
                 for c in 0..3 {
                     let d = &mut row[3 * x + c];
-                    let s = px[c];
-                    let blended = match mode {
-                        1 => 1.0 - (1.0 - *d) * (1.0 - s),
-                        2 => (*d + s).min(1.0),
-                        3 => *d * s,
-                        _ => s,
-                    };
-                    *d += (blended - *d) * a;
+                    *d += (blended[c].clamp(0.0, 1.0) - *d) * a;
                 }
             }
         });
+    }
+}
+
+/// One channel of a blend: `d` is the picture, `s` the loop.
+#[inline]
+fn blend(mode: u8, d: f32, s: f32) -> f32 {
+    let overlay = |a: f32, b: f32| if a < 0.5 { 2.0 * a * b } else { 1.0 - 2.0 * (1.0 - a) * (1.0 - b) };
+    match mode {
+        1 => 1.0 - (1.0 - d) * (1.0 - s),
+        2 => d + s,
+        3 => d * s,
+        6 => d - s,
+        7 => (d - s).abs(),
+        8 => overlay(d, s),
+        9 => (1.0 - 2.0 * s) * d * d + 2.0 * s * d,
+        10 => overlay(s, d),
+        11 => d.max(s),
+        12 => d.min(s),
+        13 => d / (1.0 - s).max(0.02),
+        14 => 1.0 - (1.0 - d) / s.max(0.02),
+        _ => s,
     }
 }
 

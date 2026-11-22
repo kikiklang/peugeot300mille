@@ -45,9 +45,12 @@ police est installée.
   boucle.
 - **Calques vidéo** (onglet Image) : jusqu'à 3 boucles vidéo par-dessus l'image, chacune avec
   Placement (« Dans le circuit » : les effets l'abîment aussi ; « Par-dessus » : intact), Mode
-  (Normal, Écran, Addition, Multiplier, Incrustation du noir / du blanc pour les boucles VJ),
-  Opacité, Taille, Position, Vitesse. Opacité et Taille sont pilotables par le son. **Début** et **Fin** choisissent le
-  passage du fichier qui boucle (20 s au plus, gardées en mémoire).
+  (18 modes : Normal, Écran, Addition, Multiplier, Soustraction, Différence, Superposition,
+  Lumière douce / forte, Éclaircir, Assombrir, Densité couleur − / +, Couleur, Luminosité,
+  Incrustation du noir / du blanc / du vert),
+  Opacité, Taille, Position, Vitesse. Opacité et Taille sont pilotables par le son. Une **barre de sélection** choisit le
+  passage du fichier qui boucle (poignées fines, zone à glisser, Maj = 10× plus fin, molette =
+  une image ; 20 s au plus, gardées en mémoire).
 - **📼 Magnétoscope VHS** (entre le boîtier et la télé, sur le signal composite) : Usure
   (couleur qui bave et traîne, luma moins nette, souffle), Tracking (bande où l'image glisse et se déchire), Traits (les traits blancs qui défilent dans la bande),
   Drop-outs (traits blancs, ligne répétée), Instabilité (lignes qui tremblent, haut qui ondule,

@@ -1,7 +1,7 @@
 //! The desktop window.
 
 use crate::audio::{bin_freq, freq_bin, N_BANDS, N_GLOBAL, SOURCES, SPEC_BINS};
-use crate::engine::{lut::Lut, overlay::{Clip, MAX_SECONDS, MODES, PLACES}};
+use crate::engine::{lut::Lut, overlay::{Clip, MAX_SECONDS, MODES, MODE_HELP, PLACES}};
 use crate::params::{Band, Params, AMP_KNOBS, BAND_HINTS, CAMERAS, CAM_GROUPS, CAM_KNOBS, INPUT_KNOBS, KNOBS, MIRRORS, SOUND_PRESETS, VHS_KNOBS};
 use crate::player::{self, Cmd, OverlayInfo, Shared, Status};
 use crate::render::{render, Knobs};
@@ -71,6 +71,9 @@ impl App {
             *shared.params.lock().unwrap() = q.clamped();
         }
         let shot = std::env::var("GLITCHBOX_SCREENSHOT").ok().map(|p| (p, 0));
+        if let Ok(f) = std::env::var("GLITCHBOX_OVERLAY1") {
+            load_overlay(0, PathBuf::from(f), None, &tx, &shared);
+        }
         Self { tab, ov_edit: [None; 3], sel_band: 0, band_drag: None, shared, tx, tex: None, seen: 0, seek: None, job: None, shot }
     }
 
@@ -182,7 +185,8 @@ fn overlay_ui(
         Some(n) => RichText::new(format!("Calque {} — {n}", slot + 1)).color(ACCENT),
         None => RichText::new(format!("Calque {} — vide", slot + 1)).color(WEAK),
     };
-    egui::CollapsingHeader::new(title).id_salt(("overlay", slot)).default_open(name.is_some()).show(ui, |ui| {
+    // A separate state for "empty" and "loaded", so a slot opens by itself when a loop arrives.
+    egui::CollapsingHeader::new(title).id_salt(("overlay", slot, name.is_some())).default_open(name.is_some()).show(ui, |ui| {
         ui.horizontal(|ui| {
             if ui.button(if name.is_some() { "Changer…" } else { "Charger une boucle…" }).clicked() {
                 if let Some(f) = rfd::FileDialog::new()
@@ -202,33 +206,7 @@ fn overlay_ui(
         let Some(info) = info else { return };
         // Which part of the file loops.
         let (mut a, mut b) = edit.unwrap_or((info.start, info.end));
-        let mut release = false;
-        egui::Grid::new(("ovrange", slot)).num_columns(2).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
-            // Both sliders share the same fixed scale (the whole file). A slider never moves the
-            // other one: the one being dragged stops at its limit (not past the other end, and
-            // no more than MAX_SECONDS away from it).
-            let dur = info.duration.max(0.2);
-            ui.label("Début");
-            let r = ui.add(egui::Slider::new(&mut a, 0.0..=dur - 0.1).suffix(" s").fixed_decimals(2))
-                .on_hover_text("Où la boucle commence dans le fichier.");
-            release |= r.drag_stopped() || r.lost_focus();
-            if r.changed() {
-                a = a.clamp((b - MAX_SECONDS).max(0.0), (b - 0.1).max(0.0));
-            }
-            ui.end_row();
-            ui.label("Fin");
-            let r = ui.add(egui::Slider::new(&mut b, 0.1..=dur).suffix(" s").fixed_decimals(2))
-                .on_hover_text(format!("Où la boucle s'arrête. {} s au plus après le début.", MAX_SECONDS));
-            release |= r.drag_stopped() || r.lost_focus();
-            if r.changed() {
-                b = b.clamp((a + 0.1).min(dur), (a + MAX_SECONDS).min(dur));
-            }
-            ui.end_row();
-        });
-        if b - a >= MAX_SECONDS - 0.01 {
-            ui.label(RichText::new(format!("Limite : {} s de boucle au plus. Rapproche l'autre curseur pour aller plus loin.", MAX_SECONDS)).small().color(ACCENT));
-        }
-        ui.label(RichText::new(format!("Boucle de {:.2} s, fichier de {:.1} s", b - a, info.duration)).small().color(WEAK));
+        let release = ui::range_bar(ui, egui::Id::new(("ovrange", slot)), &mut a, &mut b, info.duration, MAX_SECONDS, 1.0 / crate::engine::signal::TV_FPS);
         if (a - info.start).abs() > 1e-3 || (b - info.end).abs() > 1e-3 {
             *edit = Some((a, b));
             if release {
@@ -246,13 +224,13 @@ fn overlay_ui(
             });
             ui.end_row();
             ui.label("Mode");
-            egui::ComboBox::from_id_salt(("ovmode", slot)).selected_text(MODES[o.mode as usize]).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("ovmode", slot)).selected_text(MODES[o.mode as usize]).height(420.0).show_ui(ui, |ui| {
                 for (i, m) in MODES.iter().enumerate() {
-                    ui.selectable_value(&mut o.mode, i as u8, *m);
+                    ui.selectable_value(&mut o.mode, i as u8, *m).on_hover_text(MODE_HELP[i]);
                 }
             })
             .response
-            .on_hover_text("Incrustation du noir : le fond noir d'une boucle VJ disparaît.");
+            .on_hover_text(MODE_HELP[o.mode as usize]);
             ui.end_row();
         });
         let n = slot + 1;
