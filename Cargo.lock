@@ -1434,20 +1434,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glitchbox"
-version = "0.7.0"
-dependencies = [
- "anyhow",
- "cpal",
- "eframe",
- "rayon",
- "rfd",
- "rustfft",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2596,6 +2582,20 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "peugeot300mille"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "cpal",
+ "eframe",
+ "rayon",
+ "rfd",
+ "rustfft",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pin-project"

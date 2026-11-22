@@ -442,7 +442,7 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
-    //! Needs a video: GLITCHBOX_TEST_VIDEO=/path/in.mp4 cargo test --release -- --nocapture
+    //! Needs a video: PEUGEOT300MILLE_TEST_VIDEO=/path/in.mp4 cargo test --release -- --nocapture
     use super::*;
     use std::sync::mpsc::channel;
 
@@ -459,8 +459,8 @@ mod tests {
 
     #[test]
     fn play_record_render() {
-        let Ok(video) = std::env::var("GLITCHBOX_TEST_VIDEO") else { return };
-        let dir = std::env::temp_dir().join("glitchbox-test");
+        let Ok(video) = std::env::var("PEUGEOT300MILLE_TEST_VIDEO") else { return };
+        let dir = std::env::temp_dir().join("peugeot300mille-test");
         std::fs::create_dir_all(&dir).unwrap();
         let shared = Arc::new(Shared::new());
         let (tx, rx) = channel();

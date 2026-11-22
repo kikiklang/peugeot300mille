@@ -16,10 +16,10 @@ use std::sync::{Arc, Mutex};
 
 pub fn run(input: Option<PathBuf>) -> Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 880.0]).with_min_inner_size([1000.0, 600.0]).with_title("glitchbox"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 880.0]).with_min_inner_size([1000.0, 600.0]).with_title("peugeot300mille"),
         ..Default::default()
     };
-    eframe::run_native("glitchbox", options, Box::new(move |cc| Ok(Box::new(App::new(cc, input)))))
+    eframe::run_native("peugeot300mille", options, Box::new(move |cc| Ok(Box::new(App::new(cc, input)))))
         .map_err(|e| anyhow!("{e}"))
 }
 
@@ -48,7 +48,7 @@ struct App {
     seen: u64,
     seek: Option<f64>,
     job: Option<RenderJob>,
-    /// Development aid: GLITCHBOX_SCREENSHOT=out.ppm captures this window and quits.
+    /// Development aid: PEUGEOT300MILLE_SCREENSHOT=out.ppm captures this window and quits.
     shot: Option<(String, u32)>,
 }
 
@@ -62,16 +62,16 @@ impl App {
         if let Some(p) = input {
             let _ = tx.send(Cmd::Open(p));
         }
-        let tab = match std::env::var("GLITCHBOX_TAB").as_deref() {
+        let tab = match std::env::var("PEUGEOT300MILLE_TAB").as_deref() {
             Ok("camera") => Tab::Camera,
             Ok("sound") => Tab::Sound,
             _ => Tab::Image,
         };
-        if let Some(q) = std::env::var("GLITCHBOX_PARAMS").ok().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|s| serde_json::from_str::<Params>(&s).ok()) {
+        if let Some(q) = std::env::var("PEUGEOT300MILLE_PARAMS").ok().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|s| serde_json::from_str::<Params>(&s).ok()) {
             *shared.params.lock().unwrap() = q.clamped();
         }
-        let shot = std::env::var("GLITCHBOX_SCREENSHOT").ok().map(|p| (p, 0));
-        if let Ok(f) = std::env::var("GLITCHBOX_OVERLAY1") {
+        let shot = std::env::var("PEUGEOT300MILLE_SCREENSHOT").ok().map(|p| (p, 0));
+        if let Ok(f) = std::env::var("PEUGEOT300MILLE_OVERLAY1") {
             load_overlay(0, PathBuf::from(f), None, &tx, &shared);
         }
         Self { tab, ov_edit: [None; 3], sel_band: 0, band_drag: None, shared, tx, tex: None, seen: 0, seek: None, job: None, shot }
@@ -84,7 +84,7 @@ impl App {
     fn start_render(&mut self, auto: Automation) {
         let Some(out) = rfd::FileDialog::new()
             .set_title("Rendre l'enregistrement")
-            .set_file_name("glitchbox.mp4")
+            .set_file_name("peugeot300mille.mp4")
             .add_filter("MP4", &["mp4"])
             .save_file()
         else {
@@ -484,7 +484,7 @@ impl eframe::App for App {
                     if ui.add_enabled(!st.auto_rec, egui::Button::new(live_txt)).on_hover_text("Enregistre ce qui est joué dans un fichier vidéo, avec le son d'origine.").clicked() {
                         if live {
                             self.send(Cmd::RecLive(None));
-                        } else if let Some(p) = rfd::FileDialog::new().set_file_name("glitchbox-live.mp4").add_filter("MP4", &["mp4"]).save_file() {
+                        } else if let Some(p) = rfd::FileDialog::new().set_file_name("peugeot300mille-live.mp4").add_filter("MP4", &["mp4"]).save_file() {
                             self.send(Cmd::RecLive(Some(p)));
                         }
                     }

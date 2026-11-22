@@ -1,7 +1,7 @@
-//! glitchbox — analog video feedback glitch box for Linux.
+//! peugeot300mille — analog video feedback glitch box for Linux.
 //!
-//!     glitchbox [input.mp4]                                  open the desktop app
-//!     glitchbox render IN OUT [--params p.json | --automation a.json] [--start S] [--frames N]
+//!     peugeot300mille [input.mp4]                                  open the desktop app
+//!     peugeot300mille render IN OUT [--params p.json | --automation a.json] [--start S] [--frames N]
 
 mod app;
 mod audio;
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
         return cli_render(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("--help") {
-        println!("glitchbox [input]\nglitchbox render IN OUT [--params p.json | --automation a.json] [--start S] [--frames N] [--lut-in a.cube] [--lut-out b.cube]");
+        println!("peugeot300mille [input]\npeugeot300mille render IN OUT [--params p.json | --automation a.json] [--start S] [--frames N] [--lut-in a.cube] [--lut-out b.cube]");
         return Ok(());
     }
     app::run(args.first().map(PathBuf::from))
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
 
 fn cli_render(args: &[String]) -> Result<()> {
     if args.len() < 2 {
-        bail!("usage: glitchbox render IN OUT [--params p.json | --automation a.json] [--start S] [--frames N]");
+        bail!("usage: peugeot300mille render IN OUT [--params p.json | --automation a.json] [--start S] [--frames N]");
     }
     let input = PathBuf::from(&args[0]);
     let output = PathBuf::from(&args[1]);

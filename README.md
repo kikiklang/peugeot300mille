@@ -1,4 +1,4 @@
-# glitchbox v0.7
+# peugeot300mille v0.8
 
 Boîte de glitch vidéo analogique pour Linux. La vidéo passe par un **vrai signal composite NTSC
 simulé** (910 échantillons × 525 lignes à 4×fsc) et traverse un ampli vidéo avec feedback, un
@@ -19,8 +19,8 @@ synchro ne sont pas celles du plugin : elles sont réglables dans `src/engine/am
 
 ```sh
 cargo build --release
-./target/release/glitchbox                 # ouvre la fenêtre
-./target/release/glitchbox ma_video.mp4    # ouvre directement une vidéo
+./target/release/peugeot300mille                 # ouvre la fenêtre
+./target/release/peugeot300mille ma_video.mp4    # ouvre directement une vidéo
 ```
 
 ### Dans la fenêtre
@@ -77,9 +77,9 @@ police est installée.
 ### En ligne de commande
 
 ```sh
-glitchbox render IN.mp4 OUT.mp4 --params reglage.json [--start 12.5] [--frames 300]
-glitchbox render IN.mp4 OUT.mp4 --automation sortie.automation.json
-glitchbox render IN.mp4 OUT.mp4 --params r.json --lut-in look.cube --lut-out film.cube --overlay1 boucle.mp4@2.5-8
+peugeot300mille render IN.mp4 OUT.mp4 --params reglage.json [--start 12.5] [--frames 300]
+peugeot300mille render IN.mp4 OUT.mp4 --automation sortie.automation.json
+peugeot300mille render IN.mp4 OUT.mp4 --params r.json --lut-in look.cube --lut-out film.cube --overlay1 boucle.mp4@2.5-8
 ```
 
 ## Comment ça marche
@@ -102,7 +102,7 @@ Le rendu est déterministe : une même plage avec les mêmes réglages donne le 
 ## Tests
 
 ```sh
-GLITCHBOX_TEST_VIDEO=/chemin/video_avec_son.mp4 cargo test --release
+PEUGEOT300MILLE_TEST_VIDEO=/chemin/video_avec_son.mp4 cargo test --release
 ```
 
 ## Pas encore là

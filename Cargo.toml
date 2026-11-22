@@ -1,6 +1,6 @@
 [package]
-name = "glitchbox"
-version = "0.7.0"
+name = "peugeot300mille"
+version = "0.8.0"
 edition = "2021"
 description = "Analog video feedback glitch box for Linux: composite NTSC signal, enhancer with feedback, sync mixer, TV and camera loop."
 license = "MIT"
