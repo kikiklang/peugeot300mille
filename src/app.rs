@@ -204,20 +204,16 @@ fn overlay_ui(
         let (mut a, mut b) = edit.unwrap_or((info.start, info.end));
         let mut release = false;
         egui::Grid::new(("ovrange", slot)).num_columns(2).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
-            // Both sliders share the same fixed scale (the whole file); the other end only moves
-            // when it has to (end before start, or a loop longer than MAX_SECONDS).
+            // Both sliders share the same fixed scale (the whole file). A slider never moves the
+            // other one: the one being dragged stops at its limit (not past the other end, and
+            // no more than MAX_SECONDS away from it).
             let dur = info.duration.max(0.2);
             ui.label("Début");
             let r = ui.add(egui::Slider::new(&mut a, 0.0..=dur - 0.1).suffix(" s").fixed_decimals(2))
                 .on_hover_text("Où la boucle commence dans le fichier.");
             release |= r.drag_stopped() || r.lost_focus();
             if r.changed() {
-                if b < a + 0.1 {
-                    b = (a + 0.1).min(dur);
-                }
-                if b > a + MAX_SECONDS {
-                    b = a + MAX_SECONDS;
-                }
+                a = a.clamp((b - MAX_SECONDS).max(0.0), (b - 0.1).max(0.0));
             }
             ui.end_row();
             ui.label("Fin");
@@ -225,15 +221,13 @@ fn overlay_ui(
                 .on_hover_text(format!("Où la boucle s'arrête. {} s au plus après le début.", MAX_SECONDS));
             release |= r.drag_stopped() || r.lost_focus();
             if r.changed() {
-                if a > b - 0.1 {
-                    a = (b - 0.1).max(0.0);
-                }
-                if a < b - MAX_SECONDS {
-                    a = b - MAX_SECONDS;
-                }
+                b = b.clamp((a + 0.1).min(dur), (a + MAX_SECONDS).min(dur));
             }
             ui.end_row();
         });
+        if b - a >= MAX_SECONDS - 0.01 {
+            ui.label(RichText::new(format!("Limite : {} s de boucle au plus. Rapproche l'autre curseur pour aller plus loin.", MAX_SECONDS)).small().color(ACCENT));
+        }
         ui.label(RichText::new(format!("Boucle de {:.2} s, fichier de {:.1} s", b - a, info.duration)).small().color(WEAK));
         if (a - info.start).abs() > 1e-3 || (b - info.end).abs() > 1e-3 {
             *edit = Some((a, b));
