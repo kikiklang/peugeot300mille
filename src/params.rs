@@ -1,0 +1,290 @@
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// A knob driven by the sound: `source` indexes [`crate::audio::SOURCES`] (0 = none),
+/// `depth` in -1..1 is how far the sound pushes the knob.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Mod {
+    pub source: u8,
+    pub depth: f32,
+}
+
+/// A frequency band of the soundtrack that can drive knobs: `mode` 0 = level, 1 = attacks.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Band {
+    pub lo: f32,
+    pub hi: f32,
+    pub mode: u8,
+    /// Sensitivity in dB (-12..12): how hard the band drives the knobs.
+    pub sens: f32,
+}
+
+impl Band {
+    pub fn centre(&self) -> f32 {
+        (self.lo * self.hi).sqrt()
+    }
+    /// Width in octaves.
+    pub fn width(&self) -> f32 {
+        (self.hi / self.lo).log2()
+    }
+    pub fn set(&mut self, centre: f32, width: f32) {
+        let w = width.clamp(0.1, 6.0);
+        let c = centre.clamp(20.0, 20000.0);
+        self.lo = (c / 2f32.powf(w / 2.0)).max(20.0);
+        self.hi = (c * 2f32.powf(w / 2.0)).min(20000.0);
+    }
+}
+
+impl Default for Band {
+    fn default() -> Self {
+        DEFAULT_BANDS[0]
+    }
+}
+
+/// Starting bands, aimed at a typical master: kick, snare, voice, hi-hats.
+pub const DEFAULT_BANDS: [Band; 4] = [
+    Band { lo: 40.0, hi: 110.0, mode: 1, sens: 0.0 },
+    Band { lo: 150.0, hi: 300.0, mode: 1, sens: 0.0 },
+    Band { lo: 300.0, hi: 3000.0, mode: 0, sens: 0.0 },
+    Band { lo: 7000.0, hi: 14000.0, mode: 0, sens: 0.0 },
+];
+pub const BAND_HINTS: [&str; 4] = ["kick", "caisse claire", "voix", "hi-hat"];
+
+/// Number of knobs the sound can drive.
+pub const N_KNOBS: usize = 13;
+
+/// The knobs of the box. Every control starts at 0, which is a clean pass through the circuit.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Params {
+    // Input processor (before the circuit).
+    pub brightness: f32,
+    pub contrast: f32,
+    pub gamma: f32,
+    pub saturation: f32,
+    /// Degrees.
+    pub hue: f32,
+    /// How much of the input LUT is applied (0..1).
+    pub lut_in_amount: f32,
+    // Amp.
+    pub enhancer_gain: f32,
+    pub enhancer_tone: f32,
+    pub feedback_gain: f32,
+    pub feedback_tone: f32,
+    pub sync: f32,
+    // VHS deck.
+    pub vhs_wear: f32,
+    pub vhs_tracking: f32,
+    pub vhs_dropouts: f32,
+    pub vhs_jitter: f32,
+    // Camera loop.
+    pub mix: f32,
+    pub blur: f32,
+    pub color: f32,
+    pub noise: f32,
+    /// Index into [`CAMERAS`].
+    pub camera: u8,
+    // Output.
+    /// How much of the output LUT is applied (0..1).
+    pub lut_out_amount: f32,
+    /// How each knob follows the sound, in [`KNOBS`] order.
+    #[serde(deserialize_with = "lenient_mods")]
+    pub mods: [Mod; N_KNOBS],
+    /// Overall strength of the sound's influence (0..2).
+    pub sound_amount: f32,
+    /// The four user frequency bands.
+    pub bands: [Band; 4],
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            brightness: 0.0,
+            contrast: 0.0,
+            gamma: 0.0,
+            saturation: 0.0,
+            hue: 0.0,
+            lut_in_amount: 1.0,
+            enhancer_gain: 0.0,
+            enhancer_tone: 0.0,
+            feedback_gain: 0.0,
+            feedback_tone: 0.0,
+            sync: 0.0,
+            vhs_wear: 0.0,
+            vhs_tracking: 0.0,
+            vhs_dropouts: 0.0,
+            vhs_jitter: 0.0,
+            mix: 0.0,
+            blur: 0.0,
+            color: 0.0,
+            noise: 0.0,
+            camera: 0,
+            lut_out_amount: 1.0,
+            mods: [Mod::default(); N_KNOBS],
+            sound_amount: 1.0,
+            bands: DEFAULT_BANDS,
+        }
+    }
+}
+
+/// Older saved settings have fewer entries: missing ones are "not driven".
+fn lenient_mods<'de, D: Deserializer<'de>>(d: D) -> Result<[Mod; N_KNOBS], D::Error> {
+    let v: Vec<Mod> = Vec::deserialize(d)?;
+    let mut out = [Mod::default(); N_KNOBS];
+    for (o, m) in out.iter_mut().zip(v) {
+        *o = m;
+    }
+    Ok(out)
+}
+
+/// Knobs the sound can drive, in modulation order (all 0..1).
+pub const KNOBS: [&str; N_KNOBS] = [
+    "enhancer_gain",
+    "enhancer_tone",
+    "feedback_gain",
+    "feedback_tone",
+    "sync",
+    "mix",
+    "blur",
+    "color",
+    "noise",
+    "vhs_wear",
+    "vhs_tracking",
+    "vhs_dropouts",
+    "vhs_jitter",
+];
+
+/// Ready-made sound reactions: (name, [(knob, source, depth)]).
+pub const SOUND_PRESETS: [(&str, &[(&str, u8, f32)]); 6] = [
+    ("Aucun", &[]),
+    // Sources: 1 volume, 5 attacks, 6 band 1 (kick), 7 band 2 (snare), 8 band 3 (voice), 9 band 4 (hi-hat).
+    ("Pulse sur le kick", &[("feedback_gain", 6, 0.45), ("enhancer_gain", 6, 0.35), ("blur", 6, 0.15)]),
+    ("Tunnel qui respire", &[("mix", 1, 0.35), ("color", 8, 0.3), ("blur", 6, 0.25)]),
+    ("Télé qui décroche", &[("sync", 7, 0.45), ("noise", 9, 0.35), ("feedback_gain", 6, 0.2)]),
+    ("Cassette malmenée", &[("vhs_dropouts", 7, 0.6), ("vhs_tracking", 6, 0.4), ("vhs_jitter", 9, 0.5)]),
+    (
+        "Tout réagit",
+        &[("feedback_gain", 6, 0.4), ("enhancer_gain", 9, 0.4), ("sync", 7, 0.3), ("mix", 1, 0.3), ("noise", 9, 0.25), ("vhs_dropouts", 5, 0.4)],
+    ),
+];
+
+/// Where the camera stands: name and (pan, tilt, zoom, roll), each in -1..1.
+pub const CAMERAS: [(&str, [f32; 4]); 9] = [
+    ("Center", [0.0, 0.0, 0.0, 0.0]),
+    ("Pan Right", [1.0, 0.0, 0.0, 0.0]),
+    ("Pan Left", [-1.0, 0.0, 0.0, 0.0]),
+    ("Tilt Up", [0.0, 1.0, 0.0, 0.0]),
+    ("Tilt Down", [0.0, -1.0, 0.0, 0.0]),
+    ("Zoom In + Roll Right", [0.0, 0.0, 1.0, 1.0]),
+    ("Zoom In + Roll Left", [0.0, 0.0, 1.0, -1.0]),
+    ("Zoom Out + Roll Right", [0.0, 0.0, -1.0, 1.0]),
+    ("Zoom Out + Roll Left", [0.0, 0.0, -1.0, -1.0]),
+];
+
+/// Input processor sliders: (field, label, help, min, max).
+pub const INPUT_KNOBS: [(&str, &str, &str, f32, f32); 5] = [
+    ("brightness", "Luminosité", "Remonte ou baisse toute l'image.", -1.0, 1.0),
+    ("contrast", "Contraste", "Écarte ou rapproche les noirs et les blancs.", -1.0, 1.0),
+    ("gamma", "Gamma", "Éclaircit (positif) ou assombrit (négatif) les tons moyens, sans toucher aux extrêmes.", -1.0, 1.0),
+    ("saturation", "Saturation", "-1 = noir et blanc, +1 = couleurs doublées.", -1.0, 1.0),
+    ("hue", "Teinte", "Fait tourner toutes les couleurs (degrés).", -180.0, 180.0),
+];
+
+/// (field name, label, help) for the 0..1 sliders, in UI order.
+pub const AMP_KNOBS: [(&str, &str, &str); 5] = [
+    ("enhancer_gain", "Enhancer Gain", "How strongly the enhancer boosts edges. Up high, edges ring and oscillate."),
+    ("enhancer_tone", "Enhancer Tone", "How wide the edges it boosts are."),
+    ("feedback_gain", "Feedback Gain", "How much of the output goes back to the input. Never fully off."),
+    ("feedback_tone", "Feedback Tone", "How wide the changes fed back are. Up high, brightness itself is fed back."),
+    ("sync", "Sync", "Sync mixer: locked → rolling → lifting to white → white with grain → snow → sinking to black. 0 = out."),
+];
+
+pub const VHS_KNOBS: [(&str, &str, &str); 4] = [
+    ("vhs_wear", "Usure", "Bande fatiguée : image moins nette, couleur qui bave et traîne derrière, teinte qui frémit, souffle."),
+    ("vhs_tracking", "Tracking", "Réglage de piste raté : une bande de neige qui défile ; la télé peut y perdre la synchro."),
+    ("vhs_dropouts", "Drop-outs", "Manques d'oxyde : traits blancs, ou ligne du dessus répétée."),
+    ("vhs_jitter", "Instabilité", "Lignes qui tremblent, haut de l'image qui ondule, commutation des têtes visible en bas."),
+];
+
+pub const CAM_KNOBS: [(&str, &str, &str); 4] = [
+    ("mix", "Mix", "How much of the camera's picture of the screen is mixed back. 0 = camera out."),
+    ("blur", "Blur", "The lens's blur: fine detail dies and only broad light travels round."),
+    ("color", "Color", "How much colour the camera gives back (0 normal, 1 = +12 dB)."),
+    ("noise", "Noise", "The camera's gain turned up by hand, and the grain that comes with it."),
+];
+
+impl Params {
+    pub fn knob_mut(&mut self, name: &str) -> &mut f32 {
+        match name {
+            "brightness" => &mut self.brightness,
+            "contrast" => &mut self.contrast,
+            "gamma" => &mut self.gamma,
+            "saturation" => &mut self.saturation,
+            "hue" => &mut self.hue,
+            "lut_in_amount" => &mut self.lut_in_amount,
+            "enhancer_gain" => &mut self.enhancer_gain,
+            "enhancer_tone" => &mut self.enhancer_tone,
+            "feedback_gain" => &mut self.feedback_gain,
+            "feedback_tone" => &mut self.feedback_tone,
+            "sync" => &mut self.sync,
+            "vhs_wear" => &mut self.vhs_wear,
+            "vhs_tracking" => &mut self.vhs_tracking,
+            "vhs_dropouts" => &mut self.vhs_dropouts,
+            "vhs_jitter" => &mut self.vhs_jitter,
+            "mix" => &mut self.mix,
+            "blur" => &mut self.blur,
+            "color" => &mut self.color,
+            "noise" => &mut self.noise,
+            "lut_out_amount" => &mut self.lut_out_amount,
+            _ => panic!("unknown knob {name}"),
+        }
+    }
+
+    /// Applies a sound-reaction preset (keeps the knobs' own values).
+    pub fn set_sound_preset(&mut self, i: usize) {
+        self.mods = [Mod::default(); N_KNOBS];
+        for &(name, source, depth) in SOUND_PRESETS[i].1 {
+            let k = KNOBS.iter().position(|n| *n == name).unwrap();
+            self.mods[k] = Mod { source, depth };
+        }
+    }
+
+    /// The knobs as the sound pushes them this frame. `feat` = volume, bass, mid, treble, hits.
+    pub fn modulated(&self, feat: &[f32; crate::audio::N_FEAT]) -> Params {
+        let mut p = *self;
+        for (k, m) in self.mods.iter().enumerate() {
+            if m.source > 0 && m.depth != 0.0 {
+                let f = feat[(m.source as usize - 1).min(feat.len() - 1)];
+                *p.knob_mut(KNOBS[k]) += m.depth * f * self.sound_amount;
+            }
+        }
+        p.clamped()
+    }
+
+    pub fn clamped(mut self) -> Self {
+        for name in KNOBS {
+            let v = self.knob_mut(name);
+            *v = v.clamp(0.0, 1.0);
+        }
+        for (name, _, _, lo, hi) in INPUT_KNOBS {
+            let v = self.knob_mut(name);
+            *v = v.clamp(lo, hi);
+        }
+        self.lut_in_amount = self.lut_in_amount.clamp(0.0, 1.0);
+        self.lut_out_amount = self.lut_out_amount.clamp(0.0, 1.0);
+        self.camera = self.camera.min(CAMERAS.len() as u8 - 1);
+        self.sound_amount = self.sound_amount.clamp(0.0, 2.0);
+        for b in self.bands.iter_mut() {
+            b.lo = b.lo.clamp(20.0, 20000.0);
+            b.hi = b.hi.clamp(b.lo, 20000.0);
+            b.mode = b.mode.min(1);
+            b.sens = b.sens.clamp(-12.0, 12.0);
+        }
+        for m in self.mods.iter_mut() {
+            m.source = m.source.min(crate::audio::N_FEAT as u8);
+            m.depth = m.depth.clamp(-1.0, 1.0);
+        }
+        self
+    }
+}
