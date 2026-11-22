@@ -67,11 +67,13 @@ pub struct Overlay {
     pub mode: u8,
     /// 0 = in the circuit (affected by every effect), 1 = on top of the finished picture.
     pub place: u8,
+    /// Length of the loop in beats of the track, which it then follows (0 = free).
+    pub beats: u8,
 }
 
 impl Default for Overlay {
     fn default() -> Self {
-        Self { opacity: 1.0, size: 0.5, x: 0.0, y: 0.0, speed: 1.0, mode: 0, place: 0 }
+        Self { opacity: 1.0, size: 0.5, x: 0.0, y: 0.0, speed: 1.0, mode: 0, place: 0, beats: 0 }
     }
 }
 
@@ -143,6 +145,12 @@ pub struct Params {
     pub sound_amount: f32,
     /// The four user frequency bands.
     pub bands: [Band; 4],
+    /// Tempo correction in octaves: -1 = half time, +1 = double time.
+    pub tempo_octave: i8,
+    /// Shift of the beat grid, in beats.
+    pub tempo_phase: f32,
+    /// Where "Align start" was clicked, in seconds on the timeline (negative = never).
+    pub tempo_restart: f32,
 }
 
 impl Default for Params {
@@ -190,6 +198,9 @@ impl Default for Params {
             overlays: [Overlay::default(); 3],
             sound_amount: 1.0,
             bands: DEFAULT_BANDS,
+            tempo_octave: 0,
+            tempo_phase: 0.0,
+            tempo_restart: -1.0,
         }
     }
 }
@@ -295,7 +306,7 @@ pub const CAM_GROUPS: [(&str, &[(&str, &str, &str)]); 4] = [
 ];
 
 /// Ready-made sound reactions: (name, [(knob, source, depth)]).
-pub const SOUND_PRESETS: [(&str, &[(&str, u8, f32)]); 6] = [
+pub const SOUND_PRESETS: [(&str, &[(&str, u8, f32)]); 7] = [
     ("Aucun", &[]),
     // Sources: 1 volume, 5 attacks, 6 band 1 (kick), 7 band 2 (snare), 8 band 3 (voice), 9 band 4 (hi-hat).
     ("Pulse sur le kick", &[("feedback_gain", 6, 0.45), ("enhancer_gain", 6, 0.35), ("blur", 6, 0.15)]),
@@ -306,6 +317,8 @@ pub const SOUND_PRESETS: [(&str, &[(&str, u8, f32)]); 6] = [
         "Tout réagit",
         &[("feedback_gain", 6, 0.4), ("enhancer_gain", 9, 0.4), ("sync", 7, 0.3), ("mix", 1, 0.3), ("noise", 9, 0.25), ("vhs_dropouts", 5, 0.4)],
     ),
+    // Sources: 11 pulse each beat, 13 pulse each 4 beats, 15 slow wave over 4 beats.
+    ("Calé sur le tempo", &[("feedback_gain", 11, 0.4), ("enhancer_gain", 11, 0.25), ("sync", 13, 0.3), ("color", 15, 0.3)]),
 ];
 
 /// Where the camera stands: name and (pan, tilt, zoom, roll), each in -1..1.
@@ -431,6 +444,7 @@ impl Params {
     }
 
     pub fn clamped(mut self) -> Self {
+        self.replace_nan();
         for (name, lo, hi) in KNOBS {
             let v = self.knob_mut(name);
             *v = v.clamp(lo, hi);
@@ -444,6 +458,9 @@ impl Params {
             o.speed = o.speed.clamp(-4.0, 4.0);
             o.mode = o.mode.min(crate::engine::overlay::MODES.len() as u8 - 1);
             o.place = o.place.min(1);
+            if !crate::engine::overlay::LOOP_BEATS.contains(&o.beats) {
+                o.beats = 0;
+            }
         }
         for (name, _, _, lo, hi) in INPUT_KNOBS {
             let v = self.knob_mut(name);
@@ -459,10 +476,110 @@ impl Params {
             b.mode = b.mode.min(1);
             b.sens = b.sens.clamp(-12.0, 12.0);
         }
+        self.tempo_octave = self.tempo_octave.clamp(-2, 2);
+        self.tempo_phase = self.tempo_phase.clamp(-2.0, 2.0);
+        self.tempo_restart = if self.tempo_restart >= 0.0 { self.tempo_restart.min(86_400.0) } else { -1.0 };
         for m in self.mods.iter_mut() {
             m.source = m.source.min(crate::audio::N_FEAT as u8);
             m.depth = m.depth.clamp(-1.0, 1.0);
         }
         self
+    }
+
+    /// `clamp` lets NaN through, and one NaN in the feedback loop would stay in the picture for
+    /// good: each one goes back to its default value.
+    fn replace_nan(&mut self) {
+        let d = Params::default();
+        let names = KNOBS.iter().map(|k| k.0).chain(INPUT_KNOBS.iter().map(|k| k.0)).chain(["lut_in_amount", "lut_out_amount"]);
+        for name in names {
+            let fallback = *{ d }.knob_mut(name);
+            let v = self.knob_mut(name);
+            if v.is_nan() {
+                *v = fallback;
+            }
+        }
+        let fix = |v: &mut f32, fallback: f32| {
+            if v.is_nan() {
+                *v = fallback;
+            }
+        };
+        fix(&mut self.sound_amount, d.sound_amount);
+        fix(&mut self.tempo_phase, d.tempo_phase);
+        for (o, od) in self.overlays.iter_mut().zip(&d.overlays) {
+            fix(&mut o.x, od.x);
+            fix(&mut o.y, od.y);
+            fix(&mut o.speed, od.speed);
+        }
+        for (b, bd) in self.bands.iter_mut().zip(&d.bands) {
+            fix(&mut b.lo, bd.lo);
+            fix(&mut b.hi, bd.hi);
+            fix(&mut b.sens, bd.sens);
+        }
+        for m in self.mods.iter_mut() {
+            fix(&mut m.depth, 0.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_from_older_versions_still_load() {
+        // Before the overlays and the tempo, with fewer modulation slots and no band `sens`.
+        let old = r#"{"mix":0.4,"camera":2,"mods":[{"source":1,"depth":0.5}],"bands":[
+            {"lo":40,"hi":110,"mode":1},{"lo":150,"hi":300,"mode":1},{"lo":300,"hi":3000},{"lo":7000,"hi":14000}]}"#;
+        let p: Params = serde_json::from_str(old).unwrap();
+        assert_eq!(p.mix, 0.4);
+        assert_eq!(p.mods[0], Mod { source: 1, depth: 0.5 });
+        assert_eq!(p.mods[N_KNOBS - 1], Mod::default());
+        assert_eq!(p.overlays, [Overlay::default(); 3]);
+        assert_eq!(p.bands[0].sens, 0.0);
+        assert_eq!(p.lut_in_amount, 1.0);
+        // Longer lists than this version knows are cut, not refused.
+        let long = format!(r#"{{"mods":[{}]}}"#, vec![r#"{"source":2,"depth":0.1}"#; N_KNOBS + 5].join(","));
+        assert_eq!(serde_json::from_str::<Params>(&long).unwrap().mods[N_KNOBS - 1].source, 2);
+    }
+
+    #[test]
+    fn settings_survive_a_round_trip() {
+        let mut p = Params { mix: 0.25, camera: 3, tempo_octave: -1, ..Params::default() };
+        p.mods[7] = Mod { source: 11, depth: -0.5 };
+        p.overlays[2].beats = 4;
+        let back: Params = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn malformed_settings_are_refused_without_a_panic() {
+        for bad in ["", "{", "null", r#"{"mix":"x"}"#, r#"{"mods":3}"#, r#"{"camera":-1}"#, r#"{"overlays":[{}]}"#] {
+            assert!(serde_json::from_str::<Params>(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn clamping_makes_any_values_safe() {
+        let mut p = Params { camera: 200, mirror: 200, mix: f32::NAN, hue: f32::INFINITY, sound_amount: f32::NAN, tempo_octave: 100, ..Params::default() };
+        p.overlays[0].mode = 200;
+        p.overlays[0].opacity = f32::NAN;
+        p.overlays[1].speed = f32::NAN;
+        p.bands[0] = Band { lo: f32::NAN, hi: -5.0, mode: 9, sens: f32::NAN };
+        p.mods[0] = Mod { source: 200, depth: f32::NAN };
+        let c = p.clamped();
+        assert!((c.camera as usize) < CAMERAS.len() && (c.mirror as usize) < MIRRORS.len());
+        assert_eq!((c.mix, c.hue, c.sound_amount, c.tempo_octave), (0.0, 180.0, 1.0, 2));
+        assert_eq!((c.overlays[0].opacity, c.overlays[1].speed), (1.0, 1.0));
+        assert!(c.bands[0].lo <= c.bands[0].hi && c.bands[0].sens == 0.0);
+        assert_eq!(c.mods[0], Mod { source: crate::audio::N_FEAT as u8, depth: 0.0 });
+        // The sound can't bring a NaN back in.
+        let m = c.modulated(&[f32::NAN; crate::audio::N_FEAT]);
+        assert!(!m.enhancer_gain.is_nan());
+    }
+
+    #[test]
+    fn clamping_leaves_good_values_alone() {
+        let p = Params { mix: 0.3, hue: -90.0, cam_pan: -0.5, ..Params::default() };
+        assert_eq!(p.clamped(), p);
     }
 }

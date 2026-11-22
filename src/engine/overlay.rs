@@ -1,8 +1,8 @@
 //! Video loops laid over the picture: before the circuit (so every effect works on them) or on
 //! top of the finished picture.
 
-use super::signal::{H, TV_FPS, W};
-use crate::params::Params;
+use super::signal::{rgb_of, smoothstep, yiq_of, H, TV_FPS, W};
+use crate::params::{Overlay, Params};
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use std::io::Read;
@@ -59,6 +59,9 @@ pub const MODE_HELP: [&str; 18] = [
     "Le fond vert (chroma key) disparaît.",
 ];
 
+/// Loop lengths offered, in beats (0 = free).
+pub const LOOP_BEATS: [u8; 6] = [0, 1, 2, 4, 8, 16];
+
 /// A short clip, decoded once at the TV's frame rate, RGBA.
 pub struct Clip {
     pub path: PathBuf,
@@ -69,7 +72,9 @@ pub struct Clip {
     pub duration: f64,
     pub w: usize,
     pub h: usize,
-    frames: Vec<Vec<u8>>,
+    /// Every image of the loop, one after the other.
+    pixels: Vec<u8>,
+    n_frames: usize,
 }
 
 impl Clip {
@@ -105,31 +110,51 @@ impl Clip {
         let mut bytes = Vec::new();
         child.stdout.take().unwrap().read_to_end(&mut bytes)?;
         child.wait()?;
-        let n = w * h * 4;
-        let frames: Vec<Vec<u8>> = bytes.chunks_exact(n).map(|c| c.to_vec()).collect();
-        if frames.is_empty() {
+        // Kept in the buffer they were read into: a long loop is hundreds of megabytes, which
+        // would otherwise exist twice while loading.
+        let n_frames = bytes.len() / (w * h * 4);
+        if n_frames == 0 {
             bail!("{}: no picture could be read", path.display());
         }
+        bytes.truncate(n_frames * w * h * 4);
+        bytes.shrink_to_fit();
         let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Self { path: path.to_path_buf(), name, start, end, duration, w, h, frames })
+        Ok(Self { path: path.to_path_buf(), name, start, end, duration, w, h, pixels: bytes, n_frames })
     }
 
-    fn frame(&self, tv_k: i64, speed: f32) -> &[u8] {
-        let n = self.frames.len() as i64;
-        let i = ((tv_k as f64 * speed as f64).floor() as i64).rem_euclid(n);
-        &self.frames[i as usize]
+    fn frame(&self, tv_k: i64, o: &Overlay, beat: Option<f64>) -> &[u8] {
+        let len = (self.end - self.start) * TV_FPS;
+        let size = self.w * self.h * 4;
+        let i = frame_index(self.n_frames as i64, len, tv_k, o, beat);
+        &self.pixels[i * size..(i + 1) * size]
     }
 }
 
+/// for (`len` TV frames, not a whole number).
+/// for (`len` TV frames, not a whole number), so a loop keeps its exact length.
+fn frame_index(n: i64, len: f64, tv_k: i64, o: &Overlay, beat: Option<f64>) -> usize {
+    // On the tempo, the loop fills its beats exactly and restarts on them: it can't drift.
+    if let (Some(pos), true) = (beat, o.beats > 0) {
+        let beats = o.beats as f64;
+        let i = ((pos.rem_euclid(beats) / beats * n as f64).floor() as i64).clamp(0, n - 1);
+        return (if o.speed < 0.0 { n - 1 - i } else { i }) as usize;
+    }
+    let whole = n as f64;
+    // A file shorter than announced loops on the images it really has.
+    let cycle = if len > 0.0 && (len - whole).abs() <= 1.5 { len } else { whole };
+    let t = (tv_k as f64 * o.speed as f64).rem_euclid(cycle);
+    (t.floor() as i64).clamp(0, n - 1) as usize
+}
+
 /// Lays every overlay of the given placement over an RGB (0..1) 768 × 480 picture.
-pub fn composite(rgb: &mut [f32], clips: &[Option<std::sync::Arc<Clip>>; N_OVERLAYS], p: &Params, place: u8, tv_k: i64) {
+pub fn composite(rgb: &mut [f32], clips: &[Option<std::sync::Arc<Clip>>; N_OVERLAYS], p: &Params, place: u8, tv_k: i64, beat: Option<f64>) {
     for (s, clip) in clips.iter().enumerate() {
         let Some(clip) = clip else { continue };
         let o = &p.overlays[s];
         if o.place != place || o.opacity <= 0.0 || o.size <= 0.0 {
             continue;
         }
-        let img = clip.frame(tv_k, o.speed);
+        let img = clip.frame(tv_k, o, beat);
         // Size is a fraction of the picture height; position is the centre, -1..1.
         let dh = (o.size * H as f32).max(2.0);
         let dw = dh * clip.w as f32 / clip.h as f32;
@@ -144,10 +169,8 @@ pub fn composite(rgb: &mut [f32], clips: &[Option<std::sync::Arc<Clip>>; N_OVERL
         let (cw, ch) = (clip.w, clip.h);
         let opacity = o.opacity;
         let mode = o.mode;
-        rgb.par_chunks_mut(W * 3).enumerate().for_each(|(y, row)| {
-            if !ys.contains(&y) {
-                return;
-            }
+        let rows = &mut rgb[ys.start * W * 3..ys.end * W * 3];
+        rows.par_chunks_mut(W * 3).zip(ys.clone()).for_each(|(row, y)| {
             let v = ((y as f32 + 0.5 - y0) / dh * ch as f32 - 0.5).clamp(0.0, (ch - 1) as f32);
             for x in xs.clone() {
                 let u = ((x as f32 + 0.5 - x0) / dw * cw as f32 - 0.5).clamp(0.0, (cw - 1) as f32);
@@ -155,12 +178,12 @@ pub fn composite(rgb: &mut [f32], clips: &[Option<std::sync::Arc<Clip>>; N_OVERL
                 let lum = 0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2];
                 let mut a = px[3] * opacity;
                 match mode {
-                    4 => a *= smooth(0.04, 0.18, lum),
-                    5 => a *= 1.0 - smooth(0.82, 0.96, lum),
+                    4 => a *= smoothstep(0.04, 0.18, lum),
+                    5 => a *= 1.0 - smoothstep(0.82, 0.96, lum),
                     17 => {
                         // Green screen: how much greener than red and blue.
                         let g = px[1] - px[0].max(px[2]);
-                        a *= 1.0 - smooth(0.08, 0.25, g);
+                        a *= 1.0 - smoothstep(0.08, 0.25, g);
                     }
                     _ => {}
                 }
@@ -171,17 +194,10 @@ pub fn composite(rgb: &mut [f32], clips: &[Option<std::sync::Arc<Clip>>; N_OVERL
                 let blended: [f32; 3] = match mode {
                     15 | 16 => {
                         // Colour / luminosity: swap the light and the colour in YIQ.
-                        let yiq = |c: [f32; 3]| {
-                            (
-                                0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2],
-                                0.596 * c[0] - 0.274 * c[1] - 0.322 * c[2],
-                                0.211 * c[0] - 0.523 * c[1] + 0.312 * c[2],
-                            )
-                        };
-                        let (yb, ib, qb) = yiq(base);
-                        let (yo, io, qo) = yiq([px[0], px[1], px[2]]);
+                        let [yb, ib, qb] = yiq_of(base);
+                        let [yo, io, qo] = yiq_of([px[0], px[1], px[2]]);
                         let (y, i, q) = if mode == 15 { (yb, io, qo) } else { (yo, ib, qb) };
-                        [y + 0.956 * i + 0.621 * q, y - 0.272 * i - 0.647 * q, y - 1.106 * i + 1.703 * q]
+                        rgb_of(y, i, q)
                     }
                     _ => std::array::from_fn(|c| blend(mode, base[c], px[c])),
                 };
@@ -215,11 +231,6 @@ fn blend(mode: u8, d: f32, s: f32) -> f32 {
     }
 }
 
-fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
-    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// Bilinear RGBA sample, 0..1.
 #[inline]
 fn sample(img: &[u8], w: usize, h: usize, u: f32, v: f32) -> [f32; 4] {
@@ -236,4 +247,37 @@ fn sample(img: &[u8], w: usize, h: usize, u: f32, v: f32) -> [f32; 4] {
         *o = a * (1.0 - ty) + b * ty;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_loop_on_the_tempo_fills_its_beats() {
+        let o = Overlay { beats: 4, ..Overlay::default() };
+        assert_eq!(frame_index(100, 100.0, 7, &o, Some(0.0)), 0);
+        assert_eq!(frame_index(100, 100.0, 7, &o, Some(2.0)), 50);
+        assert_eq!(frame_index(100, 100.0, 7, &o, Some(3.999)), 99);
+        assert_eq!(frame_index(100, 100.0, 7, &o, Some(4.0)), 0);
+        assert_eq!(frame_index(100, 100.0, 7, &o, Some(-1.0)), 75);
+        let back = Overlay { beats: 4, speed: -1.0, ..Overlay::default() };
+        assert_eq!(frame_index(100, 100.0, 7, &back, Some(0.0)), 99);
+        assert_eq!(frame_index(100, 100.0, 7, &o, None), 7, "without a tempo it runs free");
+    }
+
+    #[test]
+    fn a_fractional_length_does_not_drift() {
+        let o = Overlay::default();
+        // 14.6 frames a cycle: after 1000 cycles the loop is still at its start.
+        assert_eq!(frame_index(15, 14.6, 14_600, &o, None), 0);
+        assert_eq!(frame_index(15, 14.6, 14_607, &o, None), 7);
+    }
+
+    #[test]
+    fn speed_still_applies_and_a_wrong_length_is_ignored() {
+        let o = Overlay { speed: 2.0, ..Overlay::default() };
+        assert_eq!(frame_index(100, 100.0, 7, &o, None), 14);
+        assert_eq!(frame_index(10, 600.0, 13, &Overlay::default(), None), 3);
+    }
 }

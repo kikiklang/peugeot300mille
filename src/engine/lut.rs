@@ -44,7 +44,9 @@ impl Lut {
                 _ => {} // other keywords (LUT_3D_INPUT_RANGE, …) are ignored
             }
         }
-        if size < 2 || data.len() != size * size * size {
+        // A size too large to multiply out is as invalid as one that doesn't match the data.
+        let expected = size.checked_mul(size).and_then(|n| n.checked_mul(size));
+        if size < 2 || expected != Some(data.len()) {
             bail!("{}: not a valid 3D .cube LUT ({} entries for size {size})", path.display(), data.len());
         }
         if title.is_empty() {

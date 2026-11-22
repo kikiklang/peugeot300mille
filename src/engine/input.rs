@@ -2,6 +2,7 @@
 //! 3D LUT, then saturation and hue. All at 0 (and no LUT) = untouched.
 
 use super::lut::Lut;
+use super::signal::{rgb_of, yiq_of};
 use crate::params::Params;
 use rayon::prelude::*;
 
@@ -22,6 +23,12 @@ pub fn apply_lut(rgb: &mut [f32], lut: &Lut, amount: f32) {
     });
 }
 
+/// An 8-bit level as the engine reads it.
+#[inline]
+pub fn level(v: usize) -> f32 {
+    v as f32 * (1.0 / 255.0)
+}
+
 /// `rgb` holds 0..1 values, 3 per pixel.
 pub fn process(rgb: &mut [f32], p: &Params, lut: Option<&Lut>) {
     if is_neutral(p, lut) {
@@ -33,11 +40,18 @@ pub fn process(rgb: &mut [f32], p: &Params, lut: Option<&Lut>) {
     let sat = 1.0 + p.saturation;
     let (hs, hc) = p.hue.to_radians().sin_cos();
     let lut_amt = p.lut_in_amount.clamp(0.0, 1.0);
+    // The source is 8-bit, so `powf` only ever sees 256 values.
+    let curve: [f32; 256] = std::array::from_fn(|i| level(i).clamp(0.0, 1.0).powf(gamma));
+    let apply_gamma = |x: f32| {
+        let i = (x * 255.0 + 0.5) as usize & 255;
+        // Exact match only: anything else (a value not from 8 bits) takes the real curve.
+        if level(i).clamp(0.0, 1.0).to_bits() == x.to_bits() { curve[i] } else { x.powf(gamma) }
+    };
     rgb.par_chunks_mut(3 * 64).for_each(|px| {
         for c in px.chunks_exact_mut(3) {
             let mut v = [0.0f32; 3];
             for k in 0..3 {
-                let x = c[k].clamp(0.0, 1.0).powf(gamma);
+                let x = apply_gamma(c[k].clamp(0.0, 1.0));
                 v[k] = ((x - 0.5) * contrast + 0.5 + bright).clamp(0.0, 1.0);
             }
             if let Some(l) = lut {
@@ -49,12 +63,10 @@ pub fn process(rgb: &mut [f32], p: &Params, lut: Option<&Lut>) {
                 }
             }
             if sat != 1.0 || p.hue != 0.0 {
-                let y = 0.299 * v[0] + 0.587 * v[1] + 0.114 * v[2];
-                let i0 = 0.596 * v[0] - 0.274 * v[1] - 0.322 * v[2];
-                let q0 = 0.211 * v[0] - 0.523 * v[1] + 0.312 * v[2];
+                let [y, i0, q0] = yiq_of(v);
                 let i = (i0 * hc - q0 * hs) * sat;
                 let q = (i0 * hs + q0 * hc) * sat;
-                v = [y + 0.956 * i + 0.621 * q, y - 0.272 * i - 0.647 * q, y - 1.106 * i + 1.703 * q];
+                v = rgb_of(y, i, q);
             }
             for k in 0..3 {
                 c[k] = v[k].clamp(0.0, 1.0);

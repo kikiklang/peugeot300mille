@@ -7,6 +7,7 @@
 
 use super::signal::*;
 use crate::params::Params;
+use rayon::prelude::*;
 
 /// Knob-independent constants of the circuit, kept in one place for tuning.
 pub struct AmpTuning {
@@ -42,9 +43,13 @@ pub const TUNING: AmpTuning = AmpTuning {
 };
 
 const FB_LEN: usize = 16;
+/// Samples of mains hum computed per parallel task.
+const HUM_CHUNK: usize = 1 << 14;
 
+/// What the circuit remembers from one sample to the next. Kept apart and copied to the stack
+/// for the loop, so that it lives in registers rather than behind `&mut self`.
 #[derive(Clone, Copy)]
-pub struct Amp {
+struct State {
     clamp: f32,
     lp_in: f32,
     hist: [f32; 5],
@@ -57,9 +62,27 @@ pub struct Amp {
     rng: Rng,
 }
 
+/// The knobs worked out for the current frame.
+#[derive(Clone, Copy, Default)]
+struct Coefs {
+    k_edge: f32,
+    a_in: f32,
+    a_edge: f32,
+    a_fb: f32,
+    dc_frac: f32,
+    fb_gain: f32,
+}
+
+pub struct Amp {
+    state: State,
+    coefs: Coefs,
+    /// The hum of the current frame.
+    hum: Vec<f32>,
+}
+
 impl Amp {
     pub fn new() -> Self {
-        Self {
+        let state = State {
             clamp: -BLANK,
             lp_in: 0.0,
             hist: [0.0; 5],
@@ -70,10 +93,12 @@ impl Amp {
             fb_i: 0,
             t: 0.0,
             rng: Rng(0x1234_5678),
-        }
+        };
+        Self { state, coefs: Coefs::default(), hum: Vec::new() }
     }
 
-    pub fn process(&mut self, sig: &mut [f32], p: &Params) {
+    /// Readies a frame of `len` samples, to be fed in order through [`Amp::run`].
+    pub fn begin(&mut self, len: usize, p: &Params) {
         let tu = &TUNING;
         let g = tu.gain_range.0 * (tu.gain_range.1 / tu.gain_range.0).powf(p.enhancer_gain);
         // 0.15 at the lowest gain (a gentle TV sharpness), about 7 at the highest.
@@ -85,11 +110,31 @@ impl Amp {
         // Never fully off.
         let fb_gain = 0.02 + 1.25 * p.feedback_gain.powf(1.3);
         let hum_amp = tu.hum.0 + (tu.hum.1 - tu.hum.0) * p.feedback_gain;
-        let d = tu.fb_delay.min(FB_LEN - 1);
         let w60 = 2.0 * std::f64::consts::PI * 60.0 * DT;
 
-        let mut s = *self;
-        for v in sig.iter_mut() {
+        // The hum depends only on time, and its two sines are the costliest part of a sample:
+        // they are the one thing here that can leave the serial feedback loop.
+        let t0 = self.state.t;
+        self.hum.resize(len, 0.0);
+        self.hum.par_chunks_mut(HUM_CHUNK).enumerate().for_each(|(c, out)| {
+            let mut t = t0 + (c * HUM_CHUNK) as f64;
+            for h in out {
+                t += 1.0;
+                *h = hum_amp * ((t * w60).sin() as f32 + 0.4 * (t * 2.0 * w60).sin() as f32);
+            }
+        });
+
+        self.state.t = t0 + len as f64;
+        self.coefs = Coefs { k_edge, a_in, a_edge, a_fb, dc_frac, fb_gain };
+    }
+
+    /// Runs the block of the frame that starts at sample `offset`.
+    pub fn run(&mut self, sig: &mut [f32], offset: usize) {
+        let tu = &TUNING;
+        let Coefs { k_edge, a_in, a_edge, a_fb, dc_frac, fb_gain } = self.coefs;
+        let d = tu.fb_delay.min(FB_LEN - 1);
+        let mut s = self.state;
+        for (v, &hum) in sig.iter_mut().zip(&self.hum[offset..]) {
             // Feedback returns into the input.
             let fbv = s.fb[(s.fb_i + FB_LEN - d) % FB_LEN];
             let mut x = *v - BLANK + fbv;
@@ -117,18 +162,9 @@ impl Amp {
             s.fb[s.fb_i] = src * fb_gain * busy;
             s.fb_i = (s.fb_i + 1) % FB_LEN;
             // Mains hum drifts slowly against the 59.94 Hz field.
-            s.t += 1.0;
-            let hum = hum_amp * ((s.t * w60).sin() as f32 + 0.4 * (s.t * 2.0 * w60).sin() as f32);
             *v = y + hum + BLANK;
         }
-        *self = s;
-    }
-}
-
-
-impl Default for Amp {
-    fn default() -> Self {
-        Self::new()
+        self.state = s;
     }
 }
 

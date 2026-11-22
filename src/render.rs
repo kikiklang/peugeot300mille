@@ -4,7 +4,7 @@ use crate::audio::Sound;
 use crate::engine::{lut::Lut, overlay::Clip, Engine};
 use crate::media::{probe, Encoder};
 use crate::params::Params;
-use crate::runner::{Automation, Runner};
+use crate::runner::{out_frame_at, Automation, Runner};
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
@@ -30,7 +30,7 @@ pub fn render(
 ) -> Result<()> {
     let pr = probe(input)?;
     let fps = pr.fps();
-    let j0 = (start * fps).round().max(0.0) as i64;
+    let j0 = out_frame_at(start, fps);
     let total = match (&knobs, frames) {
         (Knobs::Recorded(a), _) => a.frames.len() as i64,
         (_, Some(n)) => n,

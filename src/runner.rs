@@ -5,7 +5,7 @@
 //! moment. Starting anywhere warms the box up from 8 TV frames earlier.
 
 use crate::audio::{Sound, N_FEAT};
-use crate::engine::{signal::TV_FPS, Engine};
+use crate::engine::{sanitized, signal::TV_FPS, Engine};
 use crate::media::{Decoder, Probe, FRAME_BYTES};
 use crate::params::Params;
 use anyhow::Result;
@@ -44,7 +44,7 @@ impl Runner {
         p_at: &dyn Fn(i64) -> Params,
     ) -> Result<Self> {
         let fps = probe.fps();
-        let j0 = (t * fps).round().max(0.0) as i64;
+        let j0 = out_frame_at(t, fps);
         let k_target = tv_frame_for(j0, fps);
         let k0 = (k_target - PREROLL).max(0);
         let s0 = src_frame_for(k0, fps);
@@ -88,15 +88,18 @@ impl Runner {
         if self.eof && (self.src_idx < 0 || want > self.src_idx + 1) {
             return Ok(false);
         }
+        // Before the sound reads the knobs: its bands must not be NaN either.
+        let p = &sanitized(p);
         let p = match &self.sound {
             Some(snd) => {
                 // Read slightly ahead: the circuit takes a couple of frames to build up.
-                self.feat = snd.at(self.tv_k + LOOKAHEAD, &p.bands);
+                self.feat = snd.at(self.tv_k + LOOKAHEAD, p);
                 p.modulated(&self.feat)
             }
             None => *p,
         };
         self.engine.tv_k = self.tv_k;
+        self.engine.beat = self.sound.as_ref().and_then(|s| s.beat_position(self.tv_k, &p));
         self.engine.step(&self.src, &p);
         self.tv_k += 1;
         Ok(true)
@@ -138,7 +141,13 @@ pub fn src_frame_for(k: i64, fps: f64) -> i64 {
     ((k as f64 / TV_FPS) * fps + 1e-6).floor() as i64
 }
 pub fn out_frame_for(k: i64, fps: f64) -> i64 {
-    ((k as f64 / TV_FPS) * fps + 1e-6).floor() as i64
+    src_frame_for(k, fps)
+}
+
+/// The output frame showing at time `t`. Bounded so that the frame arithmetic can't overflow,
+/// however absurd the requested start.
+pub fn out_frame_at(t: f64, fps: f64) -> i64 {
+    (t * fps).round().clamp(0.0, 1e15) as i64
 }
 
 /// Knob values recorded frame by frame while playing.

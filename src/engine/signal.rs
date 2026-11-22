@@ -116,12 +116,6 @@ impl Template {
     }
 }
 
-impl Default for Template {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// xorshift32, as used for every noise source.
 #[derive(Clone, Copy)]
 pub struct Rng(pub u32);
@@ -149,7 +143,20 @@ impl Rng {
     }
 }
 
+#[inline]
 pub fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// RGB → YIQ, the matrix every colour control works in (the studio encoder has its own, finer one).
+#[inline]
+pub fn yiq_of([r, g, b]: [f32; 3]) -> [f32; 3] {
+    [0.299 * r + 0.587 * g + 0.114 * b, 0.596 * r - 0.274 * g - 0.322 * b, 0.211 * r - 0.523 * g + 0.312 * b]
+}
+
+/// YIQ → RGB, as a TV's matrix does it.
+#[inline]
+pub fn rgb_of(y: f32, i: f32, q: f32) -> [f32; 3] {
+    [y + 0.956 * i + 0.621 * q, y - 0.272 * i - 0.647 * q, y - 1.106 * i + 1.703 * q]
 }

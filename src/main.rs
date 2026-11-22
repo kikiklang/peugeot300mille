@@ -5,6 +5,7 @@
 
 mod app;
 mod audio;
+mod download;
 mod engine;
 mod media;
 mod params;
@@ -46,10 +47,20 @@ fn cli_render(args: &[String]) -> Result<()> {
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().context("missing value");
         match a.as_str() {
-            "--params" => params = serde_json::from_str(&std::fs::read_to_string(val()?)?)?,
-            "--automation" => auto = Some(serde_json::from_str(&std::fs::read_to_string(val()?)?)?),
-            "--start" => start = val()?.parse()?,
-            "--frames" => frames = Some(val()?.parse()?),
+            // Hand-edited files reach the engine too: out-of-range indices must not.
+            "--params" => params = read_json::<params::Params>(&val()?)?.clamped(),
+            "--automation" => {
+                let mut a: runner::Automation = read_json(&val()?)?;
+                a.frames.iter_mut().for_each(|p| *p = p.clamped());
+                auto = Some(a);
+            }
+            "--start" => {
+                start = val()?.parse()?;
+                if !(start >= 0.0 && f64::is_finite(start)) {
+                    bail!("--start: expected a time in seconds");
+                }
+            }
+            "--frames" => frames = Some(val()?.parse::<u32>().context("--frames: expected a number of frames")? as i64),
             "--lut-in" => lut_in = Some(val()?),
             "--lut-out" => lut_out = Some(val()?),
             "--overlay1" => ov[0] = Some(val()?),
@@ -72,15 +83,14 @@ fn cli_render(args: &[String]) -> Result<()> {
     };
     let luts = (load(&lut_in)?, load(&lut_out)?);
     let mut clips: [Option<std::sync::Arc<engine::overlay::Clip>>; 3] = [None, None, None];
-    // A file can be followed by @start-end in seconds: boucle.mp4@2.5-8
     for (i, (c, p)) in clips.iter_mut().zip(&ov).enumerate() {
         if let Some(p) = p {
-            let (path, range) = match p.rsplit_once('@') {
-                Some((f, r)) if r.contains('-') => (f.to_string(), r.split_once('-').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))),
-                _ => (p.clone(), auto.as_ref().and_then(|a| a.overlay_ranges[i])),
+            let (path, range) = match split_overlay_range(p) {
+                (f, Some(r)) => (f, Some(r)),
+                (f, None) => (f, auto.as_ref().and_then(|a| a.overlay_ranges[i])),
             };
-            let (s, e) = range.map_or((0.0, None), |(s, e): (f64, f64)| (s, Some(e)));
-            *c = Some(std::sync::Arc::new(engine::overlay::Clip::load_range(std::path::Path::new(&path), s, e)?));
+            let (s, e) = range.map_or((0.0, None), |(s, e)| (s, Some(e)));
+            *c = Some(std::sync::Arc::new(engine::overlay::Clip::load_range(std::path::Path::new(path), s, e)?));
         }
     }
     let knobs = match &auto {
@@ -102,4 +112,37 @@ fn cli_render(args: &[String]) -> Result<()> {
     })?;
     eprintln!("\nwrote {}", output.display());
     Ok(())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &str) -> Result<T> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {path}"))?;
+    serde_json::from_str(&text).with_context(|| format!("invalid settings in {path}"))
+}
+
+/// A file can be followed by @start-end in seconds: boucle.mp4@2.5-8. Anything else after an @
+/// belongs to the file's name (moi@home-video.mp4).
+fn split_overlay_range(arg: &str) -> (&str, Option<(f64, f64)>) {
+    let range = arg.rsplit_once('@').and_then(|(file, r)| {
+        let (a, b) = r.split_once('-')?;
+        let (a, b): (f64, f64) = (a.parse().ok()?, b.parse().ok()?);
+        (a.is_finite() && b.is_finite() && a >= 0.0 && b > a).then_some((file, (a, b)))
+    });
+    match range {
+        Some((file, r)) => (file, Some(r)),
+        None => (arg, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_overlay_range;
+
+    #[test]
+    fn overlay_ranges_are_told_from_file_names() {
+        assert_eq!(split_overlay_range("boucle.mp4@2.5-8"), ("boucle.mp4", Some((2.5, 8.0))));
+        assert_eq!(split_overlay_range("boucle.mp4"), ("boucle.mp4", None));
+        assert_eq!(split_overlay_range("moi@home-video.mp4"), ("moi@home-video.mp4", None));
+        assert_eq!(split_overlay_range("a.mp4@nan-inf"), ("a.mp4@nan-inf", None));
+        assert_eq!(split_overlay_range("a.mp4@8-2"), ("a.mp4@8-2", None));
+    }
 }

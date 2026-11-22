@@ -9,6 +9,7 @@
 //! * each line is resampled at its sub-sample position (Catmull-Rom) into the 768 × 480 raster.
 
 use super::signal::*;
+use rayon::prelude::*;
 
 /// Horizontal PLL gains (per line).
 const KP: f64 = 0.30;
@@ -25,6 +26,18 @@ const V_HOLD: f64 = FIELD as f64 * 0.85;
 /// Colour PLL gain and pull-in limit per line (rad).
 const KC: f64 = 0.25;
 const C_PULL: f64 = 0.1198;
+
+/// Everything needed to draw one line once the serial sync and colour tracking has passed it.
+#[derive(Clone, Copy)]
+struct LineJob {
+    /// Absolute sample of the first column to demodulate, and the sub-sample position.
+    i0: i64,
+    frac: f32,
+    cth: f32,
+    sth: f32,
+    porch: f32,
+    gain_c: f32,
+}
 
 pub struct Tv {
     buf: Vec<f32>,
@@ -51,10 +64,8 @@ pub struct Tv {
     clock: f32,
     color_on: bool,
     pub raster: Vec<f32>,
-    // per-line scratch
-    yr: Vec<f32>,
-    ir: Vec<f32>,
-    qr: Vec<f32>,
+    /// The line to draw on each row in this frame (a later line on the same row replaces it).
+    jobs: Vec<Option<LineJob>>,
 }
 
 impl Tv {
@@ -88,9 +99,7 @@ impl Tv {
             clock: 0.0,
             color_on: false,
             raster: vec![0.0; W * H * 3],
-            yr: vec![0.0; W + 16],
-            ir: vec![0.0; W + 16],
-            qr: vec![0.0; W + 16],
+            jobs: vec![None; H],
         }
     }
 
@@ -101,16 +110,33 @@ impl Tv {
 
     /// Feeds one frame of signal whose first sample has absolute index `abs0`.
     pub fn push(&mut self, frame: &[f32], abs0: i64) {
+        self.begin(abs0);
+        self.feed(frame);
+        self.end();
+    }
+
+    /// Starts a frame whose first sample has absolute index `abs0`.
+    pub fn begin(&mut self, abs0: i64) {
         if self.buf.is_empty() {
             self.base = abs0;
             self.scan = abs0;
             self.line_start = abs0 as f64;
         }
         debug_assert_eq!(self.base + self.buf.len() as i64, abs0);
-        self.buf.extend_from_slice(frame);
+    }
+
+    /// The next block of the frame: only the sync separator runs as the signal arrives.
+    pub fn feed(&mut self, block: &[f32]) {
+        self.buf.extend_from_slice(block);
         self.slice();
+    }
+
+    /// The frame is complete: tracks and draws its lines, then forgets what no line will look at
+    /// again. The tracking has to wait for this point: it reads the sync tip as the separator
+    /// left it at the end of the frame, and the separator reads the porch the tracking updates.
+    pub fn end(&mut self) {
         self.lines();
-        // Drop what no line will look at again.
+        self.draw_lines();
         let keep_from = (self.line_start as i64 - 2 * SPL as i64).max(self.base);
         let drop = (keep_from - self.base) as usize;
         if drop > 0 {
@@ -123,58 +149,57 @@ impl Tv {
 
     #[inline]
     fn at(&self, a: i64) -> f32 {
-        let i = a - self.base;
-        if i < 0 || i as usize >= self.buf.len() {
-            BLANK
-        } else {
-            self.buf[i as usize]
-        }
+        sample_at(&self.buf, self.base, a)
     }
 
     fn slice(&mut self) {
         let end = self.base + self.buf.len() as i64;
-        let mut a = self.scan;
-        while a < end {
-            let s = self.buf[(a - self.base) as usize];
-            if s < self.tip {
-                self.tip += (s - self.tip) * 0.02;
+        // On the stack for the loop: this runs once per sample of the signal.
+        let (mut tip, porch, mut in_sync, mut pulse_start) = (self.tip, self.porch, self.in_sync, self.pulse_start);
+        let (mut vint, mut v_armed) = (self.vint, self.v_armed);
+        let first = (self.scan - self.base) as usize;
+        for (a, &s) in (self.scan..end).zip(&self.buf[first..]) {
+            if s < tip {
+                tip += (s - tip) * 0.02;
             } else {
-                self.tip += (self.porch - self.tip) * 0.0002;
+                tip += (porch - tip) * 0.0002;
             }
-            let span = (self.porch - self.tip).max(0.02);
-            let mid = self.tip + 0.5 * span;
+            let span = (porch - tip).max(0.02);
+            let mid = tip + 0.5 * span;
             let hyst = 0.05 * span;
-            let now = if self.in_sync { s < mid + hyst } else { s < mid - hyst };
-            if now && !self.in_sync {
-                self.pulse_start = a;
-            } else if !now && self.in_sync {
-                let w = (a - self.pulse_start) as f64;
+            let now = if in_sync { s < mid + hyst } else { s < mid - hyst };
+            if now && !in_sync {
+                pulse_start = a;
+            } else if !now && in_sync {
+                let w = (a - pulse_start) as f64;
                 if (33.5..=107.2).contains(&w) {
-                    self.hedges.push(self.pulse_start);
+                    self.hedges.push(pulse_start);
                 }
             }
-            self.in_sync = now;
-            self.vint += ((now as u8 as f32) - self.vint) * KV;
-            if !self.v_armed && self.vint > 0.5 {
-                self.v_armed = true;
+            in_sync = now;
+            vint += ((now as u8 as f32) - vint) * KV;
+            if !v_armed && vint > 0.5 {
+                v_armed = true;
                 self.vevents.push(a);
-            } else if self.v_armed && self.vint < 0.2 {
-                self.v_armed = false;
+            } else if v_armed && vint < 0.2 {
+                v_armed = false;
             }
-            a += 1;
         }
+        (self.tip, self.in_sync, self.pulse_start, self.vint, self.v_armed) = (tip, in_sync, pulse_start, vint, v_armed);
         self.scan = end;
     }
 
+    /// The sync edge closest to `t`, within a quarter line (the earlier one on a tie).
     fn edge_near(&self, t: f64) -> Option<f64> {
+        let first = self.hedges.partition_point(|&e| e as f64 - t < -227.5);
         let mut best: Option<(f64, f64)> = None;
-        for &e in &self.hedges {
+        for &e in &self.hedges[first..] {
             let d = e as f64 - t;
-            if d.abs() <= 227.5 && best.map_or(true, |(bd, _)| d.abs() < bd) {
-                best = Some((d.abs(), e as f64));
-            }
             if d > 227.5 {
                 break;
+            }
+            if best.is_none_or(|(bd, _)| d.abs() < bd) {
+                best = Some((d.abs(), e as f64));
             }
         }
         best.map(|(_, e)| e)
@@ -265,46 +290,71 @@ impl Tv {
         if !(0.0..H as f64).contains(&row) {
             return;
         }
-        let row = row as usize;
-
-        // Y/C separation and demodulation at integer samples, then resample.
+        // Only the tracking above has to run line after line: the picture itself is drawn
+        // afterwards, on all cores, by `draw_lines`.
         let start = ls + ACT0 as f64;
-        let i0 = start.floor() as i64 - 4;
-        let frac = (start - start.floor()) as f32;
-        let (cth, sth) = (self.cphase.cos() as f32, self.cphase.sin() as f32);
-        let n = W + 12;
-        let mut ibox = [0.0f32; 4];
-        let mut qbox = [0.0f32; 4];
-        for j in 0..n {
-            let a = i0 + j as i64;
-            let s = self.at(a);
-            let y = 0.25 * self.at(a - 2) + 0.5 * s + 0.25 * self.at(a + 2);
-            let c = s - y;
-            let ph = (a & 3) as usize;
-            let co = COS4[ph] * cth - SIN4[ph] * sth;
-            let si = SIN4[ph] * cth + COS4[ph] * sth;
-            ibox[j & 3] = 2.0 * c * co;
-            qbox[j & 3] = 2.0 * c * si;
-            self.yr[j] = y;
-            self.ir[j] = 0.25 * (ibox[0] + ibox[1] + ibox[2] + ibox[3]);
-            self.qr[j] = 0.25 * (qbox[0] + qbox[1] + qbox[2] + qbox[3]);
-        }
-        let porch = self.porch;
-        let gain_c = if self.color_on { self.acc / CGAIN } else { 0.0 };
-        let out = &mut self.raster[row * W * 3..(row + 1) * W * 3];
-        for k in 0..W {
-            // Sample k sits at j = k + 4 + frac. The 4-box shifts chroma by 1.5 samples.
-            let jy = k + 4;
-            let yv = catmull(&self.yr, jy, frac);
-            let iv = catmull(&self.ir, jy + 1, frac + 0.5);
-            let qv = catmull(&self.qr, jy + 1, frac + 0.5);
-            let y = (yv - porch - (BLACK - BLANK)) / YGAIN;
-            let i = iv * gain_c;
-            let q = qv * gain_c;
-            out[3 * k] = y + 0.956 * i + 0.621 * q;
-            out[3 * k + 1] = y - 0.272 * i - 0.647 * q;
-            out[3 * k + 2] = y - 1.106 * i + 1.703 * q;
-        }
+        self.jobs[row as usize] = Some(LineJob {
+            i0: start.floor() as i64 - 4,
+            frac: (start - start.floor()) as f32,
+            cth: self.cphase.cos() as f32,
+            sth: self.cphase.sin() as f32,
+            porch: self.porch,
+            gain_c: if self.color_on { self.acc / CGAIN } else { 0.0 },
+        });
+    }
+
+    /// Draws the lines of this frame into the raster.
+    fn draw_lines(&mut self) {
+        let (buf, base) = (&self.buf[..], self.base);
+        self.raster.par_chunks_mut(W * 3).zip(self.jobs.par_iter_mut()).for_each(|(out, job)| {
+            if let Some(job) = job.take() {
+                draw_line(buf, base, &job, out);
+            }
+        });
+    }
+}
+
+/// The signal at absolute sample `a`; blanking outside what is buffered.
+#[inline]
+fn sample_at(buf: &[f32], base: i64, a: i64) -> f32 {
+    let i = a - base;
+    if i < 0 || i as usize >= buf.len() {
+        BLANK
+    } else {
+        buf[i as usize]
+    }
+}
+
+/// Y/C separation and demodulation at integer samples, then resampling into one raster row.
+fn draw_line(buf: &[f32], base: i64, job: &LineJob, out: &mut [f32]) {
+    let &LineJob { i0, frac, cth, sth, porch, gain_c } = job;
+    let mut yr = [0.0f32; W + 16];
+    let mut ir = [0.0f32; W + 16];
+    let mut qr = [0.0f32; W + 16];
+    let mut ibox = [0.0f32; 4];
+    let mut qbox = [0.0f32; 4];
+    for j in 0..W + 12 {
+        let a = i0 + j as i64;
+        let s = sample_at(buf, base, a);
+        let y = 0.25 * sample_at(buf, base, a - 2) + 0.5 * s + 0.25 * sample_at(buf, base, a + 2);
+        let c = s - y;
+        let ph = (a & 3) as usize;
+        let co = COS4[ph] * cth - SIN4[ph] * sth;
+        let si = SIN4[ph] * cth + COS4[ph] * sth;
+        ibox[j & 3] = 2.0 * c * co;
+        qbox[j & 3] = 2.0 * c * si;
+        yr[j] = y;
+        ir[j] = 0.25 * (ibox[0] + ibox[1] + ibox[2] + ibox[3]);
+        qr[j] = 0.25 * (qbox[0] + qbox[1] + qbox[2] + qbox[3]);
+    }
+    for (k, px) in out.chunks_exact_mut(3).enumerate() {
+        // Sample k sits at j = k + 4 + frac. The 4-box shifts chroma by 1.5 samples.
+        let jy = k + 4;
+        let yv = catmull(&yr, jy, frac);
+        let iv = catmull(&ir, jy + 1, frac + 0.5);
+        let qv = catmull(&qr, jy + 1, frac + 0.5);
+        let y = (yv - porch - (BLACK - BLANK)) / YGAIN;
+        px.copy_from_slice(&rgb_of(y, iv * gain_c, qv * gain_c));
     }
 }
 
