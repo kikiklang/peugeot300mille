@@ -190,6 +190,8 @@ fn overlay_ui(
                     .pick_file()
                 {
                     *edit = None;
+                    // A new loop arrives invisible: raise its opacity when you want it.
+                    p.overlays[slot].opacity = 0.0;
                     load_overlay(slot, f, None, tx, shared);
                 }
             }
