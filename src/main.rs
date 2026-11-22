@@ -11,6 +11,7 @@ mod params;
 mod player;
 mod render;
 mod runner;
+mod ui;
 
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;

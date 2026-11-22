@@ -1,4 +1,4 @@
-# glitchbox v0.5
+# glitchbox v0.6
 
 Boîte de glitch vidéo analogique pour Linux. La vidéo passe par un **vrai signal composite NTSC
 simulé** (910 échantillons × 525 lignes à 4×fsc) et traverse un ampli vidéo avec feedback, un
@@ -24,6 +24,11 @@ cargo build --release
 ```
 
 ### Dans la fenêtre
+
+Le panneau de gauche a trois onglets : **Image** (entrée, ampli, VHS, sortie), **Caméra** et
+**Son**. À côté de chaque bouton, le petit bouton **🎵** montre et règle son lien avec le son.
+Double-clic sur un curseur : retour à sa valeur de départ. L'interface utilise IBM Plex si la
+police est installée.
 
 - **📂 Ouvrir…**, **▶ Lecture / ⏸ Pause** (barre Espace), barre de temps pour se déplacer.
 - Boutons à gauche : groupes **Amp** (Enhancer Gain/Tone, Feedback Gain/Tone, Sync) et

@@ -1,13 +1,14 @@
 //! The desktop window.
 
-use crate::audio::{bin_freq, MENU_SOURCES, freq_bin, N_BANDS, N_GLOBAL, SOURCES, SPEC_BINS};
+use crate::audio::{bin_freq, freq_bin, N_BANDS, N_GLOBAL, SOURCES, SPEC_BINS};
 use crate::engine::lut::Lut;
-use crate::params::{knob_index, Band, BAND_HINTS, CAM_GROUPS, MIRRORS, Params, AMP_KNOBS, CAMERAS, CAM_KNOBS, INPUT_KNOBS, KNOBS, SOUND_PRESETS, VHS_KNOBS};
-use crate::player::{self, Cmd, Shared};
+use crate::params::{Band, Params, AMP_KNOBS, BAND_HINTS, CAMERAS, CAM_GROUPS, CAM_KNOBS, INPUT_KNOBS, KNOBS, MIRRORS, SOUND_PRESETS, VHS_KNOBS};
+use crate::player::{self, Cmd, Shared, Status};
 use crate::render::{render, Knobs};
 use crate::runner::Automation;
+use crate::ui::{self, card, knob_grid, ACCENT, REC, WEAK};
 use anyhow::{anyhow, Result};
-use eframe::egui;
+use eframe::egui::{self, RichText};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
@@ -15,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 pub fn run(input: Option<PathBuf>) -> Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1320.0, 820.0]).with_title("glitchbox"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 880.0]).with_min_inner_size([1000.0, 600.0]).with_title("glitchbox"),
         ..Default::default()
     };
     eframe::run_native("glitchbox", options, Box::new(move |cc| Ok(Box::new(App::new(cc, input)))))
@@ -28,7 +29,15 @@ struct RenderJob {
     cancel: Arc<AtomicBool>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Image,
+    Camera,
+    Sound,
+}
+
 struct App {
+    tab: Tab,
     sel_band: usize,
     band_drag: Option<usize>,
     shared: Arc<Shared>,
@@ -37,10 +46,13 @@ struct App {
     seen: u64,
     seek: Option<f64>,
     job: Option<RenderJob>,
+    /// Development aid: GLITCHBOX_SCREENSHOT=out.ppm captures this window and quits.
+    shot: Option<(String, u32)>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, input: Option<PathBuf>) -> Self {
+        ui::setup(&cc.egui_ctx);
         let shared = Arc::new(Shared::new());
         let (tx, rx) = channel();
         let ctx = cc.egui_ctx.clone();
@@ -48,7 +60,16 @@ impl App {
         if let Some(p) = input {
             let _ = tx.send(Cmd::Open(p));
         }
-        Self { sel_band: 0, band_drag: None, shared, tx, tex: None, seen: 0, seek: None, job: None }
+        let tab = match std::env::var("GLITCHBOX_TAB").as_deref() {
+            Ok("camera") => Tab::Camera,
+            Ok("sound") => Tab::Sound,
+            _ => Tab::Image,
+        };
+        if let Some(q) = std::env::var("GLITCHBOX_PARAMS").ok().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|s| serde_json::from_str::<Params>(&s).ok()) {
+            *shared.params.lock().unwrap() = q.clamped();
+        }
+        let shot = std::env::var("GLITCHBOX_SCREENSHOT").ok().map(|p| (p, 0));
+        Self { tab, sel_band: 0, band_drag: None, shared, tx, tex: None, seen: 0, seek: None, job: None, shot }
     }
 
     fn send(&self, c: Cmd) {
@@ -90,8 +111,200 @@ fn fmt_time(t: f64) -> String {
     format!("{}:{:05.2}", (t / 60.0) as u32, t % 60.0)
 }
 
+/// LUT file chooser with its dose.
+fn lut_ui(ui: &mut egui::Ui, output: bool, name: &Option<String>, amount: &mut f32, tx: &Sender<Cmd>, shared: &Shared) {
+    ui.horizontal(|ui| {
+        if ui.button(if name.is_some() { "Changer…" } else { "Charger une LUT…" }).on_hover_text("Fichier .cube (color.io, Resolve, Kdenlive…)").clicked() {
+            if let Some(f) = rfd::FileDialog::new().add_filter("LUT .cube", &["cube", "CUBE"]).pick_file() {
+                match Lut::load(&f) {
+                    Ok(l) => {
+                        let _ = tx.send(Cmd::SetLut { output, lut: Some(Arc::new(l)) });
+                    }
+                    Err(e) => shared.status.lock().unwrap().message = format!("{e:#}"),
+                }
+            }
+        }
+        match name {
+            Some(n) => {
+                ui.label(RichText::new(n).color(ACCENT));
+                if ui.small_button("Retirer").clicked() {
+                    let _ = tx.send(Cmd::SetLut { output, lut: None });
+                }
+            }
+            None => {
+                ui.label(RichText::new("aucune").color(WEAK));
+            }
+        }
+    });
+    if name.is_some() {
+        ui.add(egui::Slider::new(amount, 0.0..=1.0).fixed_decimals(2).text("Dosage"));
+    }
+}
+
+fn tab_button(ui: &mut egui::Ui, tab: &mut Tab, this: Tab, label: &str, w: f32) {
+    let sel = *tab == this;
+    let text = RichText::new(label).size(15.0).color(if sel { egui::Color32::BLACK } else { ui::TEXT });
+    let b = egui::Button::new(text).fill(if sel { ACCENT } else { egui::Color32::from_rgb(40, 44, 52) }).corner_radius(8);
+    if ui.add_sized([w, 34.0], b).clicked() {
+        *tab = this;
+    }
+}
+
+fn image_tab(ui: &mut egui::Ui, p: &mut Params, st: &Status, tx: &Sender<Cmd>, shared: &Shared) {
+    let sound = st.has_sound;
+    card(ui, "Entrée", "Avant le circuit : ce qui entre colore toute la boucle.", |ui| {
+        egui::Grid::new("input").num_columns(3).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
+            for (name, label, help, _, _) in INPUT_KNOBS {
+                ui::knob_row(ui, p, name, label, help, false);
+                ui.end_row();
+            }
+        });
+        ui.add_space(4.0);
+        lut_ui(ui, false, &st.lut_in, &mut p.lut_in_amount, tx, shared);
+    });
+    card(ui, "Amp", "Le boîtier : un enhancer dont la sortie revient à l'entrée, et le mélangeur de synchro.", |ui| {
+        knob_grid(ui, "amp", p, &AMP_KNOBS, sound);
+    });
+    card(ui, "Magnétoscope VHS", "Entre le boîtier et la télé, sur le vrai signal.", |ui| {
+        knob_grid(ui, "vhs", p, &VHS_KNOBS, sound);
+    });
+    card(ui, "Sortie", "Une LUT sur l'image finale (affichée et enregistrée).", |ui| {
+        lut_ui(ui, true, &st.lut_out, &mut p.lut_out_amount, tx, shared);
+    });
+}
+
+fn camera_tab(ui: &mut egui::Ui, p: &mut Params, st: &Status) {
+    let sound = st.has_sound;
+    card(ui, "Boucle caméra", "Une caméra filme la télé et renvoie son image dans la source. Tout le reste de cet onglet ne compte que si Mix > 0.", |ui| {
+        knob_grid(ui, "cam", p, &CAM_KNOBS, sound);
+        ui.horizontal(|ui| {
+            ui.label("Position");
+            egui::ComboBox::from_id_salt("campos").selected_text(CAMERAS[p.camera as usize].0).show_ui(ui, |ui| {
+                for (i, (n, _)) in CAMERAS.iter().enumerate() {
+                    ui.selectable_value(&mut p.camera, i as u8, *n);
+                }
+            });
+        });
+    });
+    let subs = [
+        "Bouger la caméra. Le zoom et la rotation font les tunnels et les spirales.",
+        "Appliqué à chaque tour de boucle.",
+        "Le tube de la caméra : rémanence, halo, image imprimée.",
+        "L'objectif, et ce qu'il voit de l'écran.",
+    ];
+    for ((title, knobs), sub) in CAM_GROUPS.iter().zip(subs) {
+        card(ui, title, sub, |ui| knob_grid(ui, title, p, knobs, sound));
+    }
+    card(ui, "Miroirs", "Des miroirs devant l'objectif : symétries et kaléidoscopes.", |ui| {
+        egui::ComboBox::from_id_salt("mirror").selected_text(MIRRORS[p.mirror as usize]).show_ui(ui, |ui| {
+            for (i, n) in MIRRORS.iter().enumerate() {
+                ui.selectable_value(&mut p.mirror, i as u8, *n);
+            }
+        });
+    });
+}
+
+fn sound_tab(ui: &mut egui::Ui, p: &mut Params, st: &Status, sel: &mut usize, drag: &mut Option<usize>) {
+    if !st.has_sound {
+        card(ui, "Son", "", |ui| {
+            ui.label(RichText::new("Cette vidéo n'a pas de son.").color(WEAK));
+        });
+        return;
+    }
+    card(ui, "Réaction au son", "Le son de la vidéo pousse les boutons. Clique sur 🎵 à côté d'un bouton pour le brancher.", |ui| {
+        egui::Grid::new("meters").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            for i in [1usize, 5] {
+                ui.label(SOURCES[i]);
+                ui.add(egui::ProgressBar::new(st.feat[i - 1]).desired_width(250.0).desired_height(10.0).fill(ACCENT));
+                ui.end_row();
+            }
+            ui.label("Intensité");
+            ui.add(egui::Slider::new(&mut p.sound_amount, 0.0..=2.0).fixed_decimals(2)).on_hover_text("Force globale de la réaction au son.");
+            ui.end_row();
+            ui.label("Preset");
+            egui::ComboBox::from_id_salt("sound_preset").selected_text("Choisir…").show_ui(ui, |ui| {
+                for (i, (n, _)) in SOUND_PRESETS.iter().enumerate() {
+                    if ui.selectable_label(false, *n).clicked() {
+                        p.set_sound_preset(i);
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Remplit les liens son → boutons. Les valeurs des boutons ne changent pas.");
+            ui.end_row();
+        });
+    });
+    card(ui, "Bandes de fréquence", "Place les points comme sur un EQ : ← → fréquence, ↑ ↓ sensibilité, molette = largeur.", |ui| {
+        spectrum_ui(ui, &st.spectrum, &mut p.bands, sel, drag);
+        ui.add_space(4.0);
+        egui::Grid::new("bands").num_columns(6).spacing([6.0, 6.0]).show(ui, |ui| {
+            for i in 0..N_BANDS {
+                ui.radio_value(sel, i, RichText::new(format!("Bande {}", i + 1)).color(BAND_COLORS[i]))
+                    .on_hover_text(format!("Réglage de départ : {}", BAND_HINTS[i]));
+                let b = &mut p.bands[i];
+                let (mut c, mut w) = (b.centre(), b.width());
+                let cs = c as f64 * 0.01;
+                let r1 = ui.add(egui::DragValue::new(&mut c).range(20.0..=20000.0).speed(cs).suffix(" Hz").fixed_decimals(0)).on_hover_text("Fréquence centrale");
+                let r2 = ui.add(egui::DragValue::new(&mut w).range(0.1..=6.0).speed(0.02).suffix(" oct").fixed_decimals(1)).on_hover_text("Largeur en octaves");
+                if r1.changed() || r2.changed() {
+                    b.set(c, w);
+                }
+                ui.add(egui::DragValue::new(&mut b.sens).range(-12.0..=12.0).speed(0.1).suffix(" dB").fixed_decimals(1)).on_hover_text("Sensibilité");
+                egui::ComboBox::from_id_salt(("bandmode", i)).selected_text(["Niveau", "Attaques"][b.mode as usize]).width(78.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut b.mode, 0, "Niveau").on_hover_text("Suit l'énergie de la bande.");
+                    ui.selectable_value(&mut b.mode, 1, "Attaques").on_hover_text("Réagit aux coups dans la bande.");
+                });
+                ui.add(egui::ProgressBar::new(st.feat[N_GLOBAL + i]).desired_width(30.0).desired_height(8.0).fill(BAND_COLORS[i]));
+                ui.end_row();
+            }
+        });
+    });
+    card(ui, "Liens actifs", "Ce qui est branché sur quoi.", |ui| {
+        let mut any = false;
+        egui::Grid::new("links").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
+            for (k, (name, _, _)) in KNOBS.iter().enumerate() {
+                let m = p.mods[k];
+                if m.source == 0 {
+                    continue;
+                }
+                any = true;
+                ui.label(ui::knob_label(name));
+                ui.label(RichText::new(format!("← {}  {:+.2}", SOURCES[m.source as usize], m.depth)).color(ACCENT));
+                if ui.small_button("Couper").clicked() {
+                    p.mods[k].source = 0;
+                }
+                ui.end_row();
+            }
+        });
+        if !any {
+            ui.label(RichText::new("Aucun lien. Clique sur 🎵 à côté d'un bouton, ou choisis un preset.").color(WEAK));
+        }
+    });
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some((path, n)) = self.shot.as_mut() {
+            *n += 1;
+            ctx.request_repaint();
+            if *n == 90 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            }
+            let shot = ctx.input(|i| {
+                i.raw.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(img) = shot {
+                let mut out = format!("P6\n{} {}\n255\n", img.size[0], img.size[1]).into_bytes();
+                for px in &img.pixels {
+                    out.extend_from_slice(&[px.r(), px.g(), px.b()]);
+                }
+                let _ = std::fs::write(&*path, out);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
         let st = self.shared.status.lock().unwrap().clone();
         let loaded = st.file.is_some();
 
@@ -108,32 +321,28 @@ impl eframe::App for App {
             }
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Space)) && loaded {
+        if loaded && ctx.input(|i| i.key_pressed(egui::Key::Space)) && !ctx.wants_keyboard_input() {
             self.send(if st.playing { Cmd::Pause } else { Cmd::Play });
         }
 
-        egui::TopBottomPanel::top("transport").show(ctx, |ui| {
-            ui.add_space(4.0);
+        let bar = egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(14, 10));
+        egui::TopBottomPanel::top("transport").frame(bar).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("📂 Ouvrir…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("Vidéo", &["mp4", "mov", "mkv", "avi", "webm", "m4v", "mpg", "mts"])
-                        .pick_file()
-                    {
+                if ui.button("Ouvrir…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Vidéo", &["mp4", "mov", "mkv", "avi", "webm", "m4v", "mpg", "mts"]).pick_file() {
                         self.send(Cmd::Open(p));
                     }
                 }
+                ui.add_space(6.0);
                 ui.add_enabled_ui(loaded, |ui| {
-                    if ui.button(if st.playing { "⏸ Pause" } else { "▶ Lecture" }).clicked() {
+                    let play = egui::Button::new(RichText::new(if st.playing { "⏸" } else { "▶" }).size(18.0).color(egui::Color32::BLACK)).fill(ACCENT).corner_radius(16);
+                    if ui.add_sized([44.0, 32.0], play).on_hover_text("Lecture / pause (Espace)").clicked() {
                         self.send(if st.playing { Cmd::Pause } else { Cmd::Play });
                     }
                     let dur = st.file.as_ref().map_or(1.0, |f| f.duration.max(0.01));
                     let mut t = self.seek.unwrap_or(st.time);
-                    let resp = ui.add(
-                        egui::Slider::new(&mut t, 0.0..=dur)
-                            .show_value(false)
-                            .trailing_fill(true),
-                    );
+                    ui.spacing_mut().slider_width = (ui.available_width() - 560.0).max(160.0);
+                    let resp = ui.add(egui::Slider::new(&mut t, 0.0..=dur).show_value(false));
                     if resp.dragged() || resp.changed() {
                         self.seek = Some(t);
                     }
@@ -141,277 +350,99 @@ impl eframe::App for App {
                         self.send(Cmd::Seek(t));
                         self.seek = None;
                     }
-                    ui.monospace(format!("{} / {}", fmt_time(t), fmt_time(dur)));
-                    ui.separator();
-
+                    ui.label(RichText::new(format!("{} / {}", fmt_time(t), fmt_time(dur))).monospace());
+                    ui.add_space(10.0);
                     let live = st.live_rec.is_some();
-                    let live_txt = if live { "⏹ Arrêter l'enregistrement" } else { "⏺ Enregistrer en direct…" };
-                    if ui
-                        .add_enabled(!st.auto_rec, egui::Button::new(live_txt))
-                        .on_hover_text("Écrit ce qui est joué dans un fichier vidéo, avec le son d'origine.")
-                        .clicked()
-                    {
+                    let live_txt = if live { RichText::new("⏹  Arrêter").color(REC) } else { RichText::new("⏺  En direct…") };
+                    if ui.add_enabled(!st.auto_rec, egui::Button::new(live_txt)).on_hover_text("Enregistre ce qui est joué dans un fichier vidéo, avec le son d'origine.").clicked() {
                         if live {
                             self.send(Cmd::RecLive(None));
-                        } else if let Some(p) = rfd::FileDialog::new()
-                            .set_file_name("glitchbox-live.mp4")
-                            .add_filter("MP4", &["mp4"])
-                            .save_file()
-                        {
+                        } else if let Some(p) = rfd::FileDialog::new().set_file_name("glitchbox-live.mp4").add_filter("MP4", &["mp4"]).save_file() {
                             self.send(Cmd::RecLive(Some(p)));
                         }
                     }
-                    let auto_txt = if st.auto_rec {
-                        format!("⏹ Stop ({} images)", st.auto_frames)
-                    } else {
-                        "⏺ Enregistrer les réglages".to_string()
-                    };
-                    if ui
-                        .add_enabled(!live, egui::Button::new(auto_txt))
-                        .on_hover_text("Joue la vidéo et retient chaque mouvement de bouton, pour un rendu propre ensuite.")
-                        .clicked()
-                    {
+                    let auto_txt = if st.auto_rec { RichText::new(format!("⏹  Stop ({} img)", st.auto_frames)).color(ACCENT) } else { RichText::new("⏺  Réglages") };
+                    if ui.add_enabled(!live, egui::Button::new(auto_txt)).on_hover_text("Joue la vidéo et retient chaque mouvement de bouton, pour un rendu propre ensuite.").clicked() {
                         self.send(Cmd::RecAuto(!st.auto_rec));
                     }
                     let can_render = st.automation.is_some() && self.job.is_none();
-                    if ui
-                        .add_enabled(can_render, egui::Button::new("🎬 Rendre l'enregistrement…"))
-                        .on_hover_text("Rendu hors ligne, image par image, identique à ce que vous avez joué.")
-                        .clicked()
-                    {
+                    if ui.add_enabled(can_render, egui::Button::new("Rendre…")).on_hover_text("Rendu hors ligne du passage enregistré, identique à ce que vous avez joué.").clicked() {
                         if let Some(a) = st.automation.clone() {
                             self.start_render(a);
                         }
                     }
                 });
             });
-            ui.add_space(4.0);
         });
 
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        let status = egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(14, 6));
+        egui::TopBottomPanel::bottom("status").frame(status).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if st.live_rec.is_some() {
-                    ui.colored_label(egui::Color32::RED, "● REC");
+                    ui.label(RichText::new("● REC").color(REC).strong());
                 }
                 if st.auto_rec {
-                    ui.colored_label(egui::Color32::from_rgb(255, 160, 0), "● RÉGLAGES");
+                    ui.label(RichText::new("● RÉGLAGES").color(ACCENT).strong());
                 }
                 if loaded {
-                    ui.monospace(format!("{:5.1} i/s", st.fps));
-                    ui.monospace(format!("verrou H {:3.0} %", st.h_lock * 100.0));
+                    ui.label(RichText::new(format!("{:4.1} i/s", st.fps)).monospace().color(WEAK));
+                    ui.label(RichText::new(format!("verrou H {:3.0} %", st.h_lock * 100.0)).monospace().color(WEAK));
                     ui.separator();
                 }
-                ui.label(&st.message);
+                ui.label(RichText::new(&st.message).color(WEAK));
             });
         });
 
         let tx = self.tx.clone();
         let shared = self.shared.clone();
-        let (sel, drag) = (&mut self.sel_band, &mut self.band_drag);
-        egui::SidePanel::left("knobs").resizable(false).min_width(400.0).show(ctx, |ui| {
+        let (tab, sel, drag) = (&mut self.tab, &mut self.sel_band, &mut self.band_drag);
+        let side = egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(14, 12));
+        egui::SidePanel::left("knobs").resizable(false).exact_width(480.0).frame(side).show(ctx, |ui| {
             let old = *shared.params.lock().unwrap();
             let mut p = old;
-            let sound = st.has_sound;
-            let lut_row = |ui: &mut egui::Ui, output: bool, name: &Option<String>, amount: &mut f32| {
-                ui.horizontal(|ui| {
-                    let label = if output { "LUT de sortie…" } else { "LUT d'entrée…" };
-                    if ui.button(label).on_hover_text("Fichier .cube (color.io, Resolve, Kdenlive…)").clicked() {
-                        if let Some(f) = rfd::FileDialog::new().add_filter("LUT .cube", &["cube", "CUBE"]).pick_file() {
-                            match Lut::load(&f) {
-                                Ok(l) => {
-                                    let _ = tx.send(Cmd::SetLut { output, lut: Some(Arc::new(l)) });
-                                }
-                                Err(e) => shared.status.lock().unwrap().message = format!("{e:#}"),
-                            }
-                        }
-                    }
-                    match name {
-                        Some(n) => {
-                            ui.label(n);
-                            if ui.small_button("Retirer").on_hover_text("Retirer la LUT").clicked() {
-                                let _ = tx.send(Cmd::SetLut { output, lut: None });
-                            }
-                        }
-                        None => {
-                            ui.weak("aucune");
-                        }
-                    }
-                });
-                if name.is_some() {
-                    ui.add(egui::Slider::new(amount, 0.0..=1.0).text("Dosage"));
-                }
-            };
-            egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(6.0);
-
-            // Sound reaction.
-            ui.heading("🎵 Réaction au son");
-            if sound {
-                ui.horizontal(|ui| {
-                    for i in [1usize, 5] {
-                        ui.vertical(|ui| {
-                            ui.add(egui::ProgressBar::new(st.feat[i - 1]).desired_width(150.0).desired_height(8.0));
-                            ui.small(SOURCES[i]);
-                        });
-                    }
-                });
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("sound_preset")
-                        .selected_text("Preset…")
-                        .width(150.0)
-                        .show_ui(ui, |ui| {
-                            for (i, (n, _)) in SOUND_PRESETS.iter().enumerate() {
-                                if ui.selectable_label(false, *n).clicked() {
-                                    p.set_sound_preset(i);
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text("Remplit les liens son → boutons. Les valeurs des boutons ne changent pas.");
-                    ui.add(egui::Slider::new(&mut p.sound_amount, 0.0..=2.0).text("Intensité"))
-                        .on_hover_text("Force globale de la réaction au son.");
-                });
-                ui.add_space(4.0);
-                ui.label("Bandes de fréquence");
-                spectrum_ui(ui, &st.spectrum, &mut p.bands, sel, drag);
-                for i in 0..N_BANDS {
-                    ui.horizontal(|ui| {
-                        ui.radio_value(sel, i, egui::RichText::new(format!("Bande {}", i + 1)).color(BAND_COLORS[i]))
-                            .on_hover_text(format!("Réglage de départ : {}", BAND_HINTS[i]));
-                        let b = &mut p.bands[i];
-                        let (mut c, mut w) = (b.centre(), b.width());
-                        let cs = c as f64 * 0.01;
-                        let r1 = ui.add(egui::DragValue::new(&mut c).range(20.0..=20000.0).speed(cs).suffix(" Hz").fixed_decimals(0))
-                            .on_hover_text("Fréquence centrale");
-                        let r2 = ui.add(egui::DragValue::new(&mut w).range(0.1..=6.0).speed(0.02).suffix(" oct").fixed_decimals(1))
-                            .on_hover_text("Largeur en octaves");
-                        if r1.changed() || r2.changed() {
-                            b.set(c, w);
-                        }
-                        ui.add(egui::DragValue::new(&mut b.sens).range(-12.0..=12.0).speed(0.1).suffix(" dB").fixed_decimals(1))
-                            .on_hover_text("Sensibilité : plus haut = la bande pousse plus fort les boutons");
-                        egui::ComboBox::from_id_salt(("bandmode", i))
-                            .selected_text(["Niveau", "Attaques"][b.mode as usize])
-                            .width(70.0)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut b.mode, 0, "Niveau").on_hover_text("Suit l'énergie de la bande.");
-                                ui.selectable_value(&mut b.mode, 1, "Attaques").on_hover_text("Réagit aux coups dans la bande.");
-                            });
-                        ui.add(egui::ProgressBar::new(st.feat[N_GLOBAL + i]).desired_width(46.0).desired_height(8.0));
-                    });
-                }
-                ui.small("Pour chaque bouton : la source qui le pousse (dont les bandes), et de combien (négatif = le son le fait baisser).");
-            } else {
-                ui.small("Cette vidéo n'a pas de son.");
-            }
-            ui.add_space(10.0);
-
-            let knob_row = |ui: &mut egui::Ui, p: &mut Params, k: usize, label: &str, help: &str| {
-                ui.horizontal(|ui| {
-                    let (name, lo, hi) = KNOBS[k];
-                    ui.add(egui::Slider::new(p.knob_mut(name), lo..=hi).text(label)).on_hover_text(help);
-                    if sound {
-                        let m = &mut p.mods[k];
-                        egui::ComboBox::from_id_salt(("src", k))
-                            .selected_text(SOURCES[m.source as usize])
-                            .width(76.0)
-                            .show_ui(ui, |ui| {
-                                for i in MENU_SOURCES {
-                                    ui.selectable_value(&mut m.source, i, SOURCES[i as usize]);
-                                }
-                            });
-                        ui.add_enabled(
-                            m.source > 0,
-                            egui::DragValue::new(&mut m.depth).range(-1.0..=1.0).speed(0.01).fixed_decimals(2),
-                        )
-                        .on_hover_text("Profondeur : de combien le son pousse ce bouton.");
-                    }
-                });
-            };
-            egui::CollapsingHeader::new(egui::RichText::new("🎨 Entrée (avant le circuit)").heading())
-                .default_open(true)
-                .show(ui, |ui| {
-                    for (name, label, help, lo, hi) in INPUT_KNOBS {
-                        ui.add(egui::Slider::new(p.knob_mut(name), lo..=hi).text(label)).on_hover_text(help);
-                    }
-                    lut_row(ui, false, &st.lut_in, &mut p.lut_in_amount);
-                });
-            ui.add_space(6.0);
-            let section = |ui: &mut egui::Ui, p: &mut Params, title: &str, knobs: &[(&str, &str, &str)]| {
-                egui::CollapsingHeader::new(egui::RichText::new(title).heading()).default_open(true).show(ui, |ui| {
-                    for (name, label, help) in knobs {
-                        let k = knob_index(name);
-                        knob_row(ui, p, k, label, help);
-                    }
-                });
-            };
-            section(ui, &mut p, "Amp", &AMP_KNOBS);
-            ui.add_space(6.0);
-            section(ui, &mut p, "📼 Magnétoscope VHS", &VHS_KNOBS);
-            ui.add_space(6.0);
-            section(ui, &mut p, "Video Feedback", &CAM_KNOBS);
-            egui::ComboBox::from_label("Camera")
-                .selected_text(CAMERAS[p.camera as usize].0)
-                .show_ui(ui, |ui| {
-                    for (i, (n, _)) in CAMERAS.iter().enumerate() {
-                        ui.selectable_value(&mut p.camera, i as u8, *n);
-                    }
-                })
-                .response
-                .on_hover_text("Où se tient la caméra. Ne compte que si Mix > 0.");
-            ui.indent("cam_groups", |ui| {
-                for (title, knobs) in CAM_GROUPS {
-                    egui::CollapsingHeader::new(title).default_open(false).show(ui, |ui| {
-                        for (name, label, help) in knobs {
-                            knob_row(ui, &mut p, knob_index(name), label, help);
-                        }
-                    });
-                }
-                egui::ComboBox::from_label("Miroirs")
-                    .selected_text(MIRRORS[p.mirror as usize])
-                    .show_ui(ui, |ui| {
-                        for (i, n) in MIRRORS.iter().enumerate() {
-                            ui.selectable_value(&mut p.mirror, i as u8, *n);
-                        }
-                    })
-                    .response
-                    .on_hover_text("Des miroirs devant l'objectif : symétries et kaléidoscopes.");
-            });
-            ui.small("Les effets caméra ne comptent que si Mix > 0. Tous sont coupés à 0.");
-            ui.add_space(6.0);
-            egui::CollapsingHeader::new(egui::RichText::new("🎞 Sortie").heading()).default_open(true).show(ui, |ui| {
-                lut_row(ui, true, &st.lut_out, &mut p.lut_out_amount);
-            });
-            ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button("Tout à 0").clicked() {
-                    p = Params::default();
-                }
-                if ui.button("Sauver…").clicked() {
-                    if let Some(f) = rfd::FileDialog::new().set_file_name("reglage.json").add_filter("JSON", &["json"]).save_file() {
-                        let _ = std::fs::write(f, serde_json::to_string_pretty(&p).unwrap_or_default());
-                    }
-                }
-                if ui.button("Charger…").clicked() {
-                    if let Some(f) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                        if let Some(q) = std::fs::read_to_string(f).ok().and_then(|s| serde_json::from_str::<Params>(&s).ok()) {
-                            p = q.clamped();
-                        }
-                    }
-                }
+                let w = (ui.available_width() - 16.0) / 3.0;
+                tab_button(ui, tab, Tab::Image, "Image", w);
+                tab_button(ui, tab, Tab::Camera, "Caméra", w);
+                tab_button(ui, tab, Tab::Sound, "Son", w);
             });
             ui.add_space(10.0);
-            ui.small("Espace : lecture / pause.\nUn circuit avec mémoire : chaque image dépend des précédentes. En pause, un réglage relance 8 images de chauffe.");
+            egui::TopBottomPanel::bottom("panel_footer").frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 8))).show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Tout à 0").on_hover_text("Remet tous les boutons au départ (passage propre).").clicked() {
+                        p = Params::default();
+                    }
+                    if ui.button("Sauver…").clicked() {
+                        if let Some(f) = rfd::FileDialog::new().set_file_name("reglage.json").add_filter("JSON", &["json"]).save_file() {
+                            let _ = std::fs::write(f, serde_json::to_string_pretty(&p).unwrap_or_default());
+                        }
+                    }
+                    if ui.button("Charger…").clicked() {
+                        if let Some(f) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                            if let Some(q) = std::fs::read_to_string(f).ok().and_then(|s| serde_json::from_str::<Params>(&s).ok()) {
+                                p = q.clamped();
+                            }
+                        }
+                    }
+                });
+                ui.label(RichText::new("Double-clic sur un curseur : le remettre à zéro. En pause, un réglage relance 8 images de chauffe.").small().color(WEAK));
+            });
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match *tab {
+                    Tab::Image => image_tab(ui, &mut p, &st, &tx, &shared),
+                    Tab::Camera => camera_tab(ui, &mut p, &st),
+                    Tab::Sound => sound_tab(ui, &mut p, &st, sel, drag),
+                });
             });
             if p != old {
                 *shared.params.lock().unwrap() = p;
             }
         });
 
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::BLACK)).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(ui::BG)).show(ctx, |ui| {
             if let Some(tex) = &self.tex {
                 let aspect = st.file.as_ref().map_or(4.0 / 3.0, |f| f.width as f32 / f.height.max(1) as f32);
-                let avail = ui.available_size();
+                let avail = ui.available_size() - egui::vec2(32.0, 32.0);
                 let mut size = egui::vec2(avail.x, avail.x / aspect);
                 if size.y > avail.y {
                     size = egui::vec2(avail.y * aspect, avail.y);
@@ -421,7 +452,7 @@ impl eframe::App for App {
                 });
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label(egui::RichText::new("Ouvrez une vidéo (📂 Ouvrir…)").color(egui::Color32::GRAY).size(20.0));
+                    ui.label(RichText::new("Ouvre une vidéo (bouton Ouvrir… en haut à gauche)").color(WEAK).size(20.0));
                 });
             }
         });
@@ -431,9 +462,9 @@ impl eframe::App for App {
         if let Some(job) = &self.job {
             let (d, n) = *job.progress.lock().unwrap();
             let res = job.result.lock().unwrap().clone();
-            egui::Window::new("Rendu").collapsible(false).resizable(false).show(ctx, |ui| match res {
+            egui::Window::new("Rendu").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| match res {
                 None => {
-                    ui.add(egui::ProgressBar::new(d as f32 / n.max(1) as f32).text(format!("{d} / {n} images")));
+                    ui.add(egui::ProgressBar::new(d as f32 / n.max(1) as f32).text(format!("{d} / {n} images")).fill(ACCENT).desired_width(320.0));
                     if ui.button("Annuler").clicked() {
                         job.cancel.store(true, Ordering::Relaxed);
                     }
@@ -444,7 +475,7 @@ impl eframe::App for App {
                     close = ui.button("OK").clicked();
                 }
                 Some(Err(e)) => {
-                    ui.colored_label(egui::Color32::RED, e);
+                    ui.colored_label(REC, e);
                     close = ui.button("OK").clicked();
                 }
             });
@@ -455,7 +486,7 @@ impl eframe::App for App {
     }
 }
 
-const BAND_COLORS: [egui::Color32; N_BANDS] = [
+pub const BAND_COLORS: [egui::Color32; N_BANDS] = [
     egui::Color32::from_rgb(255, 95, 70),
     egui::Color32::from_rgb(255, 200, 50),
     egui::Color32::from_rgb(90, 200, 255),
@@ -465,11 +496,11 @@ const BAND_COLORS: [egui::Color32; N_BANDS] = [
 /// Live spectrum with the four bands as EQ-style points: drag a point (left/right = frequency,
 /// up/down = sensitivity), mouse wheel on it = width, click on the background = move the selected
 /// point there.
-fn spectrum_ui(ui: &mut egui::Ui, spec: &[f32], bands: &mut [Band; N_BANDS], sel: &mut usize, drag: &mut Option<usize>) {
+pub fn spectrum_ui(ui: &mut egui::Ui, spec: &[f32], bands: &mut [Band; N_BANDS], sel: &mut usize, drag: &mut Option<usize>) {
     use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Sense, Shape, Stroke};
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 130.0), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 4.0, Color32::from_gray(16));
+    painter.rect_filled(rect, 6.0, crate::ui::BG);
     let n = SPEC_BINS as f32;
     let plot = Rect::from_min_max(rect.min + vec2(0.0, 6.0), rect.max - vec2(0.0, 14.0));
     let fx = |f: f32| plot.left() + plot.width() * (freq_bin(f) + 0.5) / n;
