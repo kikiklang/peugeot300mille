@@ -202,19 +202,34 @@ fn overlay_ui(
         let (mut a, mut b) = edit.unwrap_or((info.start, info.end));
         let mut release = false;
         egui::Grid::new(("ovrange", slot)).num_columns(2).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
+            // Both sliders share the same fixed scale (the whole file); the other end only moves
+            // when it has to (end before start, or a loop longer than MAX_SECONDS).
+            let dur = info.duration.max(0.2);
             ui.label("Début");
-            let r = ui.add(egui::Slider::new(&mut a, 0.0..=info.duration.max(0.1)).suffix(" s").fixed_decimals(2))
+            let r = ui.add(egui::Slider::new(&mut a, 0.0..=dur - 0.1).suffix(" s").fixed_decimals(2))
                 .on_hover_text("Où la boucle commence dans le fichier.");
             release |= r.drag_stopped() || r.lost_focus();
             if r.changed() {
-                b = b.clamp(a + 0.1, (a + MAX_SECONDS).min(info.duration));
+                if b < a + 0.1 {
+                    b = (a + 0.1).min(dur);
+                }
+                if b > a + MAX_SECONDS {
+                    b = a + MAX_SECONDS;
+                }
             }
             ui.end_row();
             ui.label("Fin");
-            let hi = (a + MAX_SECONDS).min(info.duration).max(a + 0.1);
-            let r = ui.add(egui::Slider::new(&mut b, (a + 0.1).min(hi)..=hi).suffix(" s").fixed_decimals(2))
-                .on_hover_text(format!("Où la boucle s'arrête. {} s au plus.", MAX_SECONDS));
+            let r = ui.add(egui::Slider::new(&mut b, 0.1..=dur).suffix(" s").fixed_decimals(2))
+                .on_hover_text(format!("Où la boucle s'arrête. {} s au plus après le début.", MAX_SECONDS));
             release |= r.drag_stopped() || r.lost_focus();
+            if r.changed() {
+                if a > b - 0.1 {
+                    a = (b - 0.1).max(0.0);
+                }
+                if a < b - MAX_SECONDS {
+                    a = b - MAX_SECONDS;
+                }
+            }
             ui.end_row();
         });
         ui.label(RichText::new(format!("Boucle de {:.2} s, fichier de {:.1} s", b - a, info.duration)).small().color(WEAK));
