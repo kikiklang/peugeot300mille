@@ -52,7 +52,7 @@ pub const DEFAULT_BANDS: [Band; 4] = [
 pub const BAND_HINTS: [&str; 4] = ["kick", "caisse claire", "voix", "hi-hat"];
 
 /// Number of knobs the sound can drive.
-pub const N_KNOBS: usize = 13;
+pub const N_KNOBS: usize = 28;
 
 /// The knobs of the box. Every control starts at 0, which is a clean pass through the circuit.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -85,6 +85,27 @@ pub struct Params {
     pub noise: f32,
     /// Index into [`CAMERAS`].
     pub camera: u8,
+    // Camera framing (on top of the chosen position).
+    pub cam_pan: f32,
+    pub cam_tilt: f32,
+    pub cam_zoom: f32,
+    pub cam_rotate: f32,
+    pub cam_drift: f32,
+    pub cam_shake: f32,
+    // Camera colour, per pass round the loop.
+    pub cam_hue: f32,
+    pub cam_negative: f32,
+    // Camera tube.
+    pub tube_lag: f32,
+    pub tube_bloom: f32,
+    pub tube_burn: f32,
+    // Lens.
+    pub lens_fisheye: f32,
+    pub lens_vignette: f32,
+    pub lens_ca: f32,
+    pub lens_moire: f32,
+    /// Mirrors in front of the lens: index into [`MIRRORS`].
+    pub mirror: u8,
     // Output.
     /// How much of the output LUT is applied (0..1).
     pub lut_out_amount: f32,
@@ -120,6 +141,22 @@ impl Default for Params {
             color: 0.0,
             noise: 0.0,
             camera: 0,
+            cam_pan: 0.0,
+            cam_tilt: 0.0,
+            cam_zoom: 0.0,
+            cam_rotate: 0.0,
+            cam_drift: 0.0,
+            cam_shake: 0.0,
+            cam_hue: 0.0,
+            cam_negative: 0.0,
+            tube_lag: 0.0,
+            tube_bloom: 0.0,
+            tube_burn: 0.0,
+            lens_fisheye: 0.0,
+            lens_vignette: 0.0,
+            lens_ca: 0.0,
+            lens_moire: 0.0,
+            mirror: 0,
             lut_out_amount: 1.0,
             mods: [Mod::default(); N_KNOBS],
             sound_amount: 1.0,
@@ -138,21 +175,83 @@ fn lenient_mods<'de, D: Deserializer<'de>>(d: D) -> Result<[Mod; N_KNOBS], D::Er
     Ok(out)
 }
 
-/// Knobs the sound can drive, in modulation order (all 0..1).
-pub const KNOBS: [&str; N_KNOBS] = [
-    "enhancer_gain",
-    "enhancer_tone",
-    "feedback_gain",
-    "feedback_tone",
-    "sync",
-    "mix",
-    "blur",
-    "color",
-    "noise",
-    "vhs_wear",
-    "vhs_tracking",
-    "vhs_dropouts",
-    "vhs_jitter",
+/// Knobs the sound can drive, in modulation order, with their range. New knobs go at the end so
+/// saved settings keep their links.
+pub const KNOBS: [(&str, f32, f32); N_KNOBS] = [
+    ("enhancer_gain", 0.0, 1.0),
+    ("enhancer_tone", 0.0, 1.0),
+    ("feedback_gain", 0.0, 1.0),
+    ("feedback_tone", 0.0, 1.0),
+    ("sync", 0.0, 1.0),
+    ("mix", 0.0, 1.0),
+    ("blur", 0.0, 1.0),
+    ("color", 0.0, 1.0),
+    ("noise", 0.0, 1.0),
+    ("vhs_wear", 0.0, 1.0),
+    ("vhs_tracking", 0.0, 1.0),
+    ("vhs_dropouts", 0.0, 1.0),
+    ("vhs_jitter", 0.0, 1.0),
+    ("cam_pan", -1.0, 1.0),
+    ("cam_tilt", -1.0, 1.0),
+    ("cam_zoom", -1.0, 1.0),
+    ("cam_rotate", -1.0, 1.0),
+    ("cam_drift", 0.0, 1.0),
+    ("cam_shake", 0.0, 1.0),
+    ("cam_hue", -1.0, 1.0),
+    ("cam_negative", 0.0, 1.0),
+    ("tube_lag", 0.0, 1.0),
+    ("tube_bloom", 0.0, 1.0),
+    ("tube_burn", 0.0, 1.0),
+    ("lens_fisheye", -1.0, 1.0),
+    ("lens_vignette", 0.0, 1.0),
+    ("lens_ca", 0.0, 1.0),
+    ("lens_moire", 0.0, 1.0),
+];
+
+pub fn knob_index(name: &str) -> usize {
+    KNOBS.iter().position(|k| k.0 == name).unwrap_or_else(|| panic!("unknown knob {name}"))
+}
+
+/// Mirrors in front of the camera lens.
+pub const MIRRORS: [&str; 6] = ["Aucun", "Miroir gauche/droite", "Miroir haut/bas", "Quatre miroirs", "Kaléidoscope 6", "Kaléidoscope 8"];
+
+/// Camera sub-groups for the UI: (title, [(field, label, help)]).
+pub const CAM_GROUPS: [(&str, &[(&str, &str, &str)]); 4] = [
+    (
+        "Cadrage",
+        &[
+            ("cam_pan", "Pan", "Tourne la caméra à gauche / à droite (s'ajoute à la position choisie)."),
+            ("cam_tilt", "Tilt", "Lève / baisse la caméra."),
+            ("cam_zoom", "Zoom", "Positif = zoom avant : le tunnel s'ouvre ; négatif = il se creuse."),
+            ("cam_rotate", "Rotation", "Fait tourner la caméra : la spirale tourne à chaque passage."),
+            ("cam_drift", "Dérive", "Le pied n'est pas fixe : la caméra glisse lentement toute seule."),
+            ("cam_shake", "Secousses", "Caméra à l'épaule. Branchée sur les attaques, elle encaisse les coups."),
+        ],
+    ),
+    (
+        "Couleur par passage",
+        &[
+            ("cam_hue", "Teinte / passage", "La teinte tourne un peu à chaque tour de boucle : tunnels arc-en-ciel."),
+            ("cam_negative", "Négatif", "Inverseur de polarité : chaque passage inverse la lumière (les couleurs restent)."),
+        ],
+    ),
+    (
+        "Tube",
+        &[
+            ("tube_lag", "Traînées", "Rémanence du tube : les lumières laissent des queues de comète."),
+            ("tube_bloom", "Halo", "Les hautes lumières bavent autour d'elles."),
+            ("tube_burn", "Marquage", "Ce qui reste longtemps à l'image s'imprime en fantôme."),
+        ],
+    ),
+    (
+        "Optique",
+        &[
+            ("lens_fisheye", "Fisheye", "Positif = grand-angle bombé, négatif = coussinet."),
+            ("lens_vignette", "Vignettage", "Les bords et les coins s'assombrissent."),
+            ("lens_ca", "Aberration", "Franges colorées sur les bords (en plus de l'aberration d'origine)."),
+            ("lens_moire", "Moiré", "La caméra voit les lignes et la grille de l'écran : franges de moiré."),
+        ],
+    ),
 ];
 
 /// Ready-made sound reactions: (name, [(knob, source, depth)]).
@@ -237,6 +336,21 @@ impl Params {
             "color" => &mut self.color,
             "noise" => &mut self.noise,
             "lut_out_amount" => &mut self.lut_out_amount,
+            "cam_pan" => &mut self.cam_pan,
+            "cam_tilt" => &mut self.cam_tilt,
+            "cam_zoom" => &mut self.cam_zoom,
+            "cam_rotate" => &mut self.cam_rotate,
+            "cam_drift" => &mut self.cam_drift,
+            "cam_shake" => &mut self.cam_shake,
+            "cam_hue" => &mut self.cam_hue,
+            "cam_negative" => &mut self.cam_negative,
+            "tube_lag" => &mut self.tube_lag,
+            "tube_bloom" => &mut self.tube_bloom,
+            "tube_burn" => &mut self.tube_burn,
+            "lens_fisheye" => &mut self.lens_fisheye,
+            "lens_vignette" => &mut self.lens_vignette,
+            "lens_ca" => &mut self.lens_ca,
+            "lens_moire" => &mut self.lens_moire,
             _ => panic!("unknown knob {name}"),
         }
     }
@@ -245,8 +359,7 @@ impl Params {
     pub fn set_sound_preset(&mut self, i: usize) {
         self.mods = [Mod::default(); N_KNOBS];
         for &(name, source, depth) in SOUND_PRESETS[i].1 {
-            let k = KNOBS.iter().position(|n| *n == name).unwrap();
-            self.mods[k] = Mod { source, depth };
+            self.mods[knob_index(name)] = Mod { source, depth };
         }
     }
 
@@ -256,17 +369,19 @@ impl Params {
         for (k, m) in self.mods.iter().enumerate() {
             if m.source > 0 && m.depth != 0.0 {
                 let f = feat[(m.source as usize - 1).min(feat.len() - 1)];
-                *p.knob_mut(KNOBS[k]) += m.depth * f * self.sound_amount;
+                let (name, lo, hi) = KNOBS[k];
+                *p.knob_mut(name) += m.depth * f * self.sound_amount * (hi - lo);
             }
         }
         p.clamped()
     }
 
     pub fn clamped(mut self) -> Self {
-        for name in KNOBS {
+        for (name, lo, hi) in KNOBS {
             let v = self.knob_mut(name);
-            *v = v.clamp(0.0, 1.0);
+            *v = v.clamp(lo, hi);
         }
+        self.mirror = self.mirror.min(MIRRORS.len() as u8 - 1);
         for (name, _, _, lo, hi) in INPUT_KNOBS {
             let v = self.knob_mut(name);
             *v = v.clamp(lo, hi);

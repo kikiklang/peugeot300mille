@@ -2,7 +2,7 @@
 
 use crate::audio::{bin_freq, MENU_SOURCES, freq_bin, N_BANDS, N_GLOBAL, SOURCES, SPEC_BINS};
 use crate::engine::lut::Lut;
-use crate::params::{Band, BAND_HINTS, Params, AMP_KNOBS, CAMERAS, CAM_KNOBS, INPUT_KNOBS, KNOBS, SOUND_PRESETS, VHS_KNOBS};
+use crate::params::{knob_index, Band, BAND_HINTS, CAM_GROUPS, MIRRORS, Params, AMP_KNOBS, CAMERAS, CAM_KNOBS, INPUT_KNOBS, KNOBS, SOUND_PRESETS, VHS_KNOBS};
 use crate::player::{self, Cmd, Shared};
 use crate::render::{render, Knobs};
 use crate::runner::Automation;
@@ -308,7 +308,8 @@ impl eframe::App for App {
 
             let knob_row = |ui: &mut egui::Ui, p: &mut Params, k: usize, label: &str, help: &str| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::Slider::new(p.knob_mut(KNOBS[k]), 0.0..=1.0).text(label)).on_hover_text(help);
+                    let (name, lo, hi) = KNOBS[k];
+                    ui.add(egui::Slider::new(p.knob_mut(name), lo..=hi).text(label)).on_hover_text(help);
                     if sound {
                         let m = &mut p.mods[k];
                         egui::ComboBox::from_id_salt(("src", k))
@@ -339,7 +340,7 @@ impl eframe::App for App {
             let section = |ui: &mut egui::Ui, p: &mut Params, title: &str, knobs: &[(&str, &str, &str)]| {
                 egui::CollapsingHeader::new(egui::RichText::new(title).heading()).default_open(true).show(ui, |ui| {
                     for (name, label, help) in knobs {
-                        let k = KNOBS.iter().position(|n| n == name).unwrap();
+                        let k = knob_index(name);
                         knob_row(ui, p, k, label, help);
                     }
                 });
@@ -358,6 +359,25 @@ impl eframe::App for App {
                 })
                 .response
                 .on_hover_text("Où se tient la caméra. Ne compte que si Mix > 0.");
+            ui.indent("cam_groups", |ui| {
+                for (title, knobs) in CAM_GROUPS {
+                    egui::CollapsingHeader::new(title).default_open(false).show(ui, |ui| {
+                        for (name, label, help) in knobs {
+                            knob_row(ui, &mut p, knob_index(name), label, help);
+                        }
+                    });
+                }
+                egui::ComboBox::from_label("Miroirs")
+                    .selected_text(MIRRORS[p.mirror as usize])
+                    .show_ui(ui, |ui| {
+                        for (i, n) in MIRRORS.iter().enumerate() {
+                            ui.selectable_value(&mut p.mirror, i as u8, *n);
+                        }
+                    })
+                    .response
+                    .on_hover_text("Des miroirs devant l'objectif : symétries et kaléidoscopes.");
+            });
+            ui.small("Les effets caméra ne comptent que si Mix > 0. Tous sont coupés à 0.");
             ui.add_space(6.0);
             egui::CollapsingHeader::new(egui::RichText::new("🎞 Sortie").heading()).default_open(true).show(ui, |ui| {
                 lut_row(ui, true, &st.lut_out, &mut p.lut_out_amount);

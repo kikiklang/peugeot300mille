@@ -1,4 +1,4 @@
-# glitchbox v0.4
+# glitchbox v0.5
 
 Boîte de glitch vidéo analogique pour Linux. La vidéo passe par un **vrai signal composite NTSC
 simulé** (910 échantillons × 525 lignes à 4×fsc) et traverse un ampli vidéo avec feedback, un
@@ -42,6 +42,14 @@ cargo build --release
   (couleur qui bave et traîne, luma moins nette, souffle), Tracking (bande de neige qui défile),
   Drop-outs (traits blancs, ligne répétée), Instabilité (lignes qui tremblent, haut qui ondule,
   commutation des têtes). Tous pilotables par le son.
+- **🎥 Caméra** (sous Video Feedback, ne compte que si Mix > 0, tout est coupé à 0) :
+  - *Cadrage* : Pan, Tilt, Zoom, Rotation continus (en plus de la position choisie), Dérive
+    (le pied glisse tout seul), Secousses (caméra à l'épaule, à brancher sur les attaques) ;
+  - *Couleur par passage* : Teinte / passage (tunnels arc-en-ciel), Négatif (inverse la lumière) ;
+  - *Tube* : Traînées (queues de comète), Halo des hautes lumières, Marquage (image fantôme) ;
+  - *Optique* : Fisheye, Vignettage, Aberration, Moiré (la caméra voit les lignes de l'écran) ;
+  - *Miroirs* : gauche/droite, haut/bas, quatre miroirs, kaléidoscope 6 ou 8.
+  Tous ces boutons sont pilotables par le son.
 - **🎞 Sortie** : une LUT `.cube` sur l'image finale, avec son dosage.
 - **Sauver… / Charger…** un réglage (JSON).
 - **🎵 Réaction au son** : le son de la vidéo pilote les boutons. Vumètres (volume, basses,
