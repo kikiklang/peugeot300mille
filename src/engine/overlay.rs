@@ -9,7 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub const N_OVERLAYS: usize = 3;
+pub const N_OVERLAYS: usize = 8;
 /// Longest loop kept in memory, and its largest side.
 pub const MAX_SECONDS: f64 = 20.0;
 const MAX_SIDE: u32 = 384;
@@ -146,6 +146,11 @@ fn frame_index(n: i64, len: f64, tv_k: i64, o: &Overlay, beat: Option<f64>) -> u
     (t.floor() as i64).clamp(0, n - 1) as usize
 }
 
+/// A coordinate along a side of `size` pixels, read from the other end if the loop is flipped.
+fn flipped(c: f32, size: usize, flip: bool) -> f32 {
+    if flip { (size - 1) as f32 - c } else { c }
+}
+
 /// Lays every overlay of the given placement over an RGB (0..1) 768 × 480 picture.
 pub fn composite(rgb: &mut [f32], clips: &[Option<std::sync::Arc<Clip>>; N_OVERLAYS], p: &Params, place: u8, tv_k: i64, beat: Option<f64>) {
     for (s, clip) in clips.iter().enumerate() {
@@ -168,12 +173,12 @@ pub fn composite(rgb: &mut [f32], clips: &[Option<std::sync::Arc<Clip>>; N_OVERL
         }
         let (cw, ch) = (clip.w, clip.h);
         let opacity = o.opacity;
-        let mode = o.mode;
+        let (mode, flip_h, flip_v) = (o.mode, o.flip_h, o.flip_v);
         let rows = &mut rgb[ys.start * W * 3..ys.end * W * 3];
         rows.par_chunks_mut(W * 3).zip(ys.clone()).for_each(|(row, y)| {
-            let v = ((y as f32 + 0.5 - y0) / dh * ch as f32 - 0.5).clamp(0.0, (ch - 1) as f32);
+            let v = flipped(((y as f32 + 0.5 - y0) / dh * ch as f32 - 0.5).clamp(0.0, (ch - 1) as f32), ch, flip_v);
             for x in xs.clone() {
-                let u = ((x as f32 + 0.5 - x0) / dw * cw as f32 - 0.5).clamp(0.0, (cw - 1) as f32);
+                let u = flipped(((x as f32 + 0.5 - x0) / dw * cw as f32 - 0.5).clamp(0.0, (cw - 1) as f32), cw, flip_h);
                 let px = sample(img, cw, ch, u, v);
                 let lum = 0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2];
                 let mut a = px[3] * opacity;

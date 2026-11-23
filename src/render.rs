@@ -1,7 +1,7 @@
 //! Offline render: every frame in order, at full quality, with the source's sound.
 
 use crate::audio::Sound;
-use crate::engine::{lut::Lut, overlay::Clip, Engine};
+use crate::engine::{lut::Lut, overlay::{Clip, N_OVERLAYS}, Engine};
 use crate::media::{probe, Encoder};
 use crate::params::Params;
 use crate::runner::{out_frame_at, Automation, Runner};
@@ -24,7 +24,7 @@ pub fn render(
     start: f64,
     frames: Option<i64>,
     luts: (Option<Arc<Lut>>, Option<Arc<Lut>>),
-    overlays: [Option<Arc<Clip>>; 3],
+    overlays: [Option<Arc<Clip>>; N_OVERLAYS],
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(i64, i64),
 ) -> Result<()> {

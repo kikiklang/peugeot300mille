@@ -5,6 +5,7 @@
 //! moment. Starting anywhere warms the box up from 8 TV frames earlier.
 
 use crate::audio::{Sound, N_FEAT};
+use crate::engine::overlay::N_OVERLAYS;
 use crate::engine::{sanitized, signal::TV_FPS, Engine};
 use crate::media::{Decoder, Probe, FRAME_BYTES};
 use crate::params::Params;
@@ -166,10 +167,12 @@ pub struct Automation {
     pub lut_out: Option<String>,
     /// Overlay files in use while recording.
     #[serde(default)]
-    pub overlays: [Option<String>; 3],
+    #[serde(deserialize_with = "crate::params::fill_slots")]
+    pub overlays: [Option<String>; N_OVERLAYS],
     /// The looping part of each overlay file (start, end) in seconds.
     #[serde(default)]
-    pub overlay_ranges: [Option<(f64, f64)>; 3],
+    #[serde(deserialize_with = "crate::params::fill_slots")]
+    pub overlay_ranges: [Option<(f64, f64)>; N_OVERLAYS],
 }
 
 impl Automation {

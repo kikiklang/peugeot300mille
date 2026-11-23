@@ -1,7 +1,7 @@
 //! The offline render of a recorded take, and its progress window.
 
 use super::link::{lock, Link};
-use crate::engine::{lut::Lut, overlay::Clip};
+use crate::engine::{lut::Lut, overlay::{Clip, N_OVERLAYS}};
 use crate::render::{render, Knobs};
 use crate::runner::Automation;
 use crate::ui::{ACCENT, REC};
@@ -85,7 +85,7 @@ fn run(auto: &Automation, out: &Path, cancel: &AtomicBool, progress: &Mutex<(i64
         }
     };
     let luts = (load_lut(&auto.lut_in), load_lut(&auto.lut_out));
-    let mut clips: [Option<Arc<Clip>>; 3] = [None, None, None];
+    let mut clips: [Option<Arc<Clip>>; N_OVERLAYS] = Default::default();
     for (i, c) in clips.iter_mut().enumerate() {
         if let Some(p) = &auto.overlays[i] {
             let (s, e) = auto.overlay_ranges[i].map_or((0.0, None), |(s, e)| (s, Some(e)));

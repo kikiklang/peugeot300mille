@@ -2,7 +2,7 @@
 //! preview slows down instead), so what you see is exactly what gets recorded.
 
 use crate::audio::{Output, Sound, N_FEAT};
-use crate::engine::{lut::Lut, overlay::Clip, Engine};
+use crate::engine::{lut::Lut, overlay::{Clip, N_OVERLAYS}, Engine};
 use crate::media::{lock, probe, Probe};
 use crate::params::Params;
 use crate::runner::{Automation, Runner};
@@ -50,7 +50,7 @@ pub struct Status {
     pub lut_in: Option<String>,
     pub lut_out: Option<String>,
     /// Loaded overlays.
-    pub overlays: [Option<OverlayInfo>; 3],
+    pub overlays: [Option<OverlayInfo>; N_OVERLAYS],
     pub feat: [f32; N_FEAT],
     /// Spectrum of the sound at the current frame (1/12 octave bins, power).
     pub spectrum: Vec<f32>,
@@ -115,7 +115,7 @@ pub fn spawn(shared: Arc<Shared>, rx: Receiver<Cmd>, repaint: impl Fn() + Send +
                 out_opened: None,
                 last_jump: None,
                 luts: (None, None),
-                clips: [None, None, None],
+                clips: Default::default(),
                 playing: false,
                 auto: None,
                 shown: Params::default(),
@@ -139,7 +139,7 @@ struct Player {
     out_opened: Option<Instant>,
     last_jump: Option<Instant>,
     luts: (Option<Arc<Lut>>, Option<Arc<Lut>>),
-    clips: [Option<Arc<Clip>>; 3],
+    clips: [Option<Arc<Clip>>; N_OVERLAYS],
     playing: bool,
     auto: Option<Automation>,
     shown: Params,
@@ -277,7 +277,7 @@ impl Player {
             }
             Cmd::RecAuto(false) => self.finish_auto(),
             Cmd::SetOverlay { slot, clip } => {
-                let slot = slot.min(2);
+                let slot = slot.min(N_OVERLAYS - 1);
                 lock(&self.shared.status).overlays[slot] = clip.as_ref().map(|c| OverlayInfo {
                     name: c.name.clone(),
                     path: c.path.clone(),
@@ -575,7 +575,7 @@ mod tests {
             auto.start,
             None,
             (None, None),
-            [None, None, None],
+            Default::default(),
             &cancel,
             &mut |_, _| {},
         )

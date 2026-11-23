@@ -88,10 +88,35 @@ knobs! {
     Ov3X = "ov3_x", -1.0, 1.0, |p| p.overlays[2].x;
     Ov3Y = "ov3_y", -1.0, 1.0, |p| p.overlays[2].y;
     Ov3Speed = "ov3_speed", -4.0, 4.0, |p| p.overlays[2].speed;
+    Ov4Opacity = "ov4_opacity", 0.0, 1.0, |p| p.overlays[3].opacity;
+    Ov4Size = "ov4_size", 0.0, 1.0, |p| p.overlays[3].size;
+    Ov4X = "ov4_x", -1.0, 1.0, |p| p.overlays[3].x;
+    Ov4Y = "ov4_y", -1.0, 1.0, |p| p.overlays[3].y;
+    Ov4Speed = "ov4_speed", -4.0, 4.0, |p| p.overlays[3].speed;
+    Ov5Opacity = "ov5_opacity", 0.0, 1.0, |p| p.overlays[4].opacity;
+    Ov5Size = "ov5_size", 0.0, 1.0, |p| p.overlays[4].size;
+    Ov5X = "ov5_x", -1.0, 1.0, |p| p.overlays[4].x;
+    Ov5Y = "ov5_y", -1.0, 1.0, |p| p.overlays[4].y;
+    Ov5Speed = "ov5_speed", -4.0, 4.0, |p| p.overlays[4].speed;
+    Ov6Opacity = "ov6_opacity", 0.0, 1.0, |p| p.overlays[5].opacity;
+    Ov6Size = "ov6_size", 0.0, 1.0, |p| p.overlays[5].size;
+    Ov6X = "ov6_x", -1.0, 1.0, |p| p.overlays[5].x;
+    Ov6Y = "ov6_y", -1.0, 1.0, |p| p.overlays[5].y;
+    Ov6Speed = "ov6_speed", -4.0, 4.0, |p| p.overlays[5].speed;
+    Ov7Opacity = "ov7_opacity", 0.0, 1.0, |p| p.overlays[6].opacity;
+    Ov7Size = "ov7_size", 0.0, 1.0, |p| p.overlays[6].size;
+    Ov7X = "ov7_x", -1.0, 1.0, |p| p.overlays[6].x;
+    Ov7Y = "ov7_y", -1.0, 1.0, |p| p.overlays[6].y;
+    Ov7Speed = "ov7_speed", -4.0, 4.0, |p| p.overlays[6].speed;
+    Ov8Opacity = "ov8_opacity", 0.0, 1.0, |p| p.overlays[7].opacity;
+    Ov8Size = "ov8_size", 0.0, 1.0, |p| p.overlays[7].size;
+    Ov8X = "ov8_x", -1.0, 1.0, |p| p.overlays[7].x;
+    Ov8Y = "ov8_y", -1.0, 1.0, |p| p.overlays[7].y;
+    Ov8Speed = "ov8_speed", -4.0, 4.0, |p| p.overlays[7].speed;
 }
 
 /// Number of knobs the sound can drive.
-pub const N_DRIVEN: usize = 33;
+pub const N_DRIVEN: usize = 43;
 
 /// The knobs the sound can drive, in the order of `Params::mods`.
 pub const DRIVEN: [Knob; N_DRIVEN] = {
@@ -100,7 +125,7 @@ pub const DRIVEN: [Knob; N_DRIVEN] = {
         EnhancerGain, EnhancerTone, FeedbackGain, FeedbackTone, Sync, Mix, Blur, Color, Noise, VhsWear, VhsTracking,
         VhsJitter, CamPan, CamTilt, CamZoom, CamRotate, CamDrift, CamShake, CamHue, CamNegative, TubeLag, TubeBloom,
         TubeBurn, LensFisheye, LensVignette, LensCa, LensMoire, Ov1Opacity, Ov1Size, Ov2Opacity, Ov2Size, Ov3Opacity,
-        Ov3Size,
+        Ov3Size, Ov4Opacity, Ov4Size, Ov5Opacity, Ov5Size, Ov6Opacity, Ov6Size, Ov7Opacity, Ov7Size, Ov8Opacity, Ov8Size,
     ]
 };
 

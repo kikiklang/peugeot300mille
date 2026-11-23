@@ -68,7 +68,7 @@ impl Engine {
             lut_out: None,
             lut_out_amount: 1.0,
             out_rgb: vec![0.0; W * H * 3],
-            overlays: [None, None, None],
+            overlays: Default::default(),
             tv_k: 0,
             beat: None,
             last_p: Params::default(),

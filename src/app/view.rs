@@ -38,7 +38,7 @@ pub struct View {
     pub bpm: Option<f32>,
     pub lut_in: Option<String>,
     pub lut_out: Option<String>,
-    pub overlays: [Option<OverlayInfo>; 3],
+    pub overlays: [Option<OverlayInfo>; crate::engine::overlay::N_OVERLAYS],
     pub feat: [f32; N_FEAT],
     pub spectrum: Vec<f32>,
     pub message: String,

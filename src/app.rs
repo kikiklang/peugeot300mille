@@ -8,6 +8,7 @@ mod tabs;
 mod transport;
 mod view;
 
+use crate::engine::overlay::N_OVERLAYS;
 use crate::engine::signal::{H, W};
 use crate::media::FRAME_BYTES;
 use crate::params::Params;
@@ -50,7 +51,9 @@ enum Tab {
 struct App {
     tab: Tab,
     /// What each overlay slot remembers between frames.
-    slots: [OverlaySlot; 3],
+    slots: [OverlaySlot; N_OVERLAYS],
+    /// How many overlay slots the panel shows (at least those in use).
+    shown_slots: usize,
     bands: BandPoints,
     link: Link,
     /// This frame's copy of the player's status.
@@ -83,11 +86,11 @@ impl App {
             *lock(&link.shared.params) = q.clamped();
         }
         let shot = std::env::var("PEUGEOT300MILLE_SCREENSHOT").ok().map(|p| (p, 0));
-        let slots: [OverlaySlot; 3] = Default::default();
+        let slots: [OverlaySlot; N_OVERLAYS] = Default::default();
         if let Ok(f) = std::env::var("PEUGEOT300MILLE_OVERLAY1") {
             slots[0].loads.spawn(0, PathBuf::from(f), None, false, &link);
         }
-        Self { tab, slots, bands: BandPoints::default(), link, view: View::default(), tex: None, seen: 0, seek: None, job: None, shot }
+        Self { tab, slots, shown_slots: 1, bands: BandPoints::default(), link, view: View::default(), tex: None, seen: 0, seek: None, job: None, shot }
     }
 
     /// Development aid, see `shot`.
@@ -134,7 +137,7 @@ impl App {
     }
 
     fn side_panel(&mut self, ctx: &egui::Context) {
-        let Self { tab, slots, bands, link, view: st, .. } = self;
+        let Self { tab, slots, shown_slots, bands, link, view: st, .. } = self;
         let side = egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(14, 12));
         egui::SidePanel::left("knobs").resizable(false).exact_width(480.0).frame(side).show(ctx, |ui| {
             let old = *lock(&link.shared.params);
@@ -168,7 +171,7 @@ impl App {
             });
             egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match *tab {
-                    Tab::Image => tabs::image_tab(ui, &mut ImageTab { p: &mut p, st, slots, link }),
+                    Tab::Image => tabs::image_tab(ui, &mut ImageTab { p: &mut p, st, slots, shown: shown_slots, link }),
                     Tab::Camera => tabs::camera_tab(ui, &mut p, st),
                     Tab::Sound => sound::sound_tab(ui, &mut p, st, bands),
                 });

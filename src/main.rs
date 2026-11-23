@@ -43,7 +43,7 @@ fn cli_render(args: &[String]) -> Result<()> {
     let mut frames = None;
     let mut lut_in: Option<String> = None;
     let mut lut_out: Option<String> = None;
-    let mut ov: [Option<String>; 3] = [None, None, None];
+    let mut ov: [Option<String>; engine::overlay::N_OVERLAYS] = Default::default();
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().context("missing value");
@@ -64,10 +64,10 @@ fn cli_render(args: &[String]) -> Result<()> {
             "--frames" => frames = Some(val()?.parse::<u32>().context("--frames: expected a number of frames")? as i64),
             "--lut-in" => lut_in = Some(val()?),
             "--lut-out" => lut_out = Some(val()?),
-            "--overlay1" => ov[0] = Some(val()?),
-            "--overlay2" => ov[1] = Some(val()?),
-            "--overlay3" => ov[2] = Some(val()?),
-            other => bail!("unknown option {other}"),
+            other => match other.strip_prefix("--overlay").and_then(|n| n.parse::<usize>().ok()) {
+                Some(n @ 1..=engine::overlay::N_OVERLAYS) => ov[n - 1] = Some(val()?),
+                _ => bail!("unknown option {other}"),
+            },
         }
     }
     if let Some(a) = &auto {
@@ -83,7 +83,7 @@ fn cli_render(args: &[String]) -> Result<()> {
         p.as_ref().map(|p| engine::lut::Lut::load(std::path::Path::new(p)).map(std::sync::Arc::new)).transpose()
     };
     let luts = (load(&lut_in)?, load(&lut_out)?);
-    let mut clips: [Option<std::sync::Arc<engine::overlay::Clip>>; 3] = [None, None, None];
+    let mut clips: [Option<std::sync::Arc<engine::overlay::Clip>>; engine::overlay::N_OVERLAYS] = Default::default();
     for (i, (c, p)) in clips.iter_mut().zip(&ov).enumerate() {
         if let Some(p) = p {
             let (path, range) = match split_overlay_range(p) {

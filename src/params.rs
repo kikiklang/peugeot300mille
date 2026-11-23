@@ -1,3 +1,4 @@
+use crate::engine::overlay::N_OVERLAYS;
 use crate::knob::{Knob, DRIVEN, N_DRIVEN};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
@@ -71,11 +72,15 @@ pub struct Overlay {
     pub place: u8,
     /// Length of the loop in beats of the track, which it then follows (0 = free).
     pub beats: u8,
+    /// Mirrored left/right.
+    pub flip_h: bool,
+    /// Upside down. With `flip_h`, a half turn.
+    pub flip_v: bool,
 }
 
 impl Default for Overlay {
     fn default() -> Self {
-        Self { opacity: 1.0, size: 0.5, x: 0.0, y: 0.0, speed: 1.0, mode: 0, place: 0, beats: 0 }
+        Self { opacity: 1.0, size: 0.5, x: 0.0, y: 0.0, speed: 1.0, mode: 0, place: 0, beats: 0, flip_h: false, flip_v: false }
     }
 }
 
@@ -136,8 +141,9 @@ pub struct Params {
     /// How each knob follows the sound, in [`DRIVEN`] order. Saved by knob name.
     #[serde(deserialize_with = "saved_mods", serialize_with = "mods_by_name")]
     pub mods: [Mod; N_DRIVEN],
-    /// The three overlay slots.
-    pub overlays: [Overlay; 3],
+    /// The overlay slots.
+    #[serde(deserialize_with = "fill_slots")]
+    pub overlays: [Overlay; N_OVERLAYS],
     /// Overall strength of the sound's influence (0..2).
     pub sound_amount: f32,
     /// The four user frequency bands.
@@ -190,7 +196,7 @@ impl Default for Params {
             mirror: 0,
             lut_out_amount: 1.0,
             mods: [Mod::default(); N_DRIVEN],
-            overlays: [Overlay::default(); 3],
+            overlays: [Overlay::default(); N_OVERLAYS],
             sound_amount: 1.0,
             bands: DEFAULT_BANDS,
             tempo_octave: 0,
@@ -209,6 +215,16 @@ const LINKS_V08: [&str; 35] = [
     "lens_vignette", "lens_ca", "lens_moire", "vhs_streaks", "ov1_opacity", "ov1_size", "ov2_opacity", "ov2_size",
     "ov3_opacity", "ov3_size",
 ];
+
+/// A list saved with another number of slots: the missing ones are empty, extra ones are dropped.
+pub fn fill_slots<'de, D, T, const N: usize>(d: D) -> Result<[T; N], D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    let mut saved = Vec::<T>::deserialize(d)?.into_iter();
+    Ok(std::array::from_fn(|_| saved.next().unwrap_or_default()))
+}
 
 fn mods_by_name<S: Serializer>(mods: &[Mod; N_DRIVEN], s: S) -> Result<S::Ok, S::Error> {
     s.collect_map(DRIVEN.iter().zip(mods).filter(|(_, m)| **m != Mod::default()).map(|(k, m)| (k.name(), m)))
@@ -438,12 +454,13 @@ mod tests {
         assert_eq!(p.mix, 0.4);
         assert_eq!(p.mods[0], Mod { source: 1, depth: 0.5 });
         assert_eq!(p.mods[N_DRIVEN - 1], Mod::default());
-        assert_eq!(p.overlays, [Overlay::default(); 3]);
+        assert_eq!(p.overlays, [Overlay::default(); N_OVERLAYS]);
         assert_eq!(p.bands[0].sens, 0.0);
         assert_eq!(p.lut_in_amount, 1.0);
         // Longer lists than this version knows are cut, not refused.
         let long = format!(r#"{{"mods":[{}]}}"#, vec![r#"{"source":2,"depth":0.1}"#; N_DRIVEN + 5].join(","));
-        assert_eq!(serde_json::from_str::<Params>(&long).unwrap().mods[N_DRIVEN - 1].source, 2);
+        let slot = Knob::Ov3Size.driven_slot().unwrap();
+        assert_eq!(serde_json::from_str::<Params>(&long).unwrap().mods[slot].source, 2);
     }
 
     #[test]
@@ -458,6 +475,13 @@ mod tests {
         assert_eq!(source(Knob::VhsJitter), 5, "must not slide when Drop-outs goes");
         assert_eq!(source(Knob::Ov1Opacity), 7, "must not slide when Traits goes");
         assert_eq!(p.mods.iter().filter(|m| m.source != 0).count(), 3, "links of removed knobs are dropped");
+    }
+
+    #[test]
+    fn settings_with_three_layers_still_load() {
+        let p: Params = serde_json::from_str(r#"{"overlays":[{"opacity":0.1},{"opacity":0.2},{"opacity":0.3}]}"#).unwrap();
+        assert_eq!((p.overlays[0].opacity, p.overlays[2].opacity), (0.1, 0.3));
+        assert_eq!(p.overlays[3], Overlay::default());
     }
 
     #[test]
@@ -480,7 +504,7 @@ mod tests {
 
     #[test]
     fn malformed_settings_are_refused_without_a_panic() {
-        for bad in ["", "{", "null", r#"{"mix":"x"}"#, r#"{"mods":3}"#, r#"{"camera":-1}"#, r#"{"overlays":[{}]}"#] {
+        for bad in ["", "{", "null", r#"{"mix":"x"}"#, r#"{"mods":3}"#, r#"{"camera":-1}"#, r#"{"overlays":3}"#] {
             assert!(serde_json::from_str::<Params>(bad).is_err(), "{bad}");
         }
     }

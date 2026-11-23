@@ -1,8 +1,8 @@
-//! The three video-loop slots: choosing the file, the part that loops, its length in beats, download.
+//! The video-loop slots: choosing the file, the part that loops, its length in beats, download.
 
 use super::link::{lock, Link};
 use crate::download::{Download, DownloadSlot};
-use crate::engine::overlay::{Clip, LOOP_BEATS, MAX_SECONDS, MODES, MODE_HELP, PLACES};
+use crate::engine::overlay::{Clip, LOOP_BEATS, MAX_SECONDS, MODES, MODE_HELP, N_OVERLAYS, PLACES};
 use crate::engine::signal::TV_FPS;
 use crate::knob::Knob;
 use crate::params::{KnobRow, Params};
@@ -27,10 +27,15 @@ macro_rules! overlay_knobs {
         ]
     };
 }
-const OVERLAY_KNOBS: [[KnobRow; 5]; 3] = [
+const OVERLAY_KNOBS: [[KnobRow; 5]; N_OVERLAYS] = [
     overlay_knobs!(Ov1Opacity, Ov1Size, Ov1X, Ov1Y, Ov1Speed),
     overlay_knobs!(Ov2Opacity, Ov2Size, Ov2X, Ov2Y, Ov2Speed),
     overlay_knobs!(Ov3Opacity, Ov3Size, Ov3X, Ov3Y, Ov3Speed),
+    overlay_knobs!(Ov4Opacity, Ov4Size, Ov4X, Ov4Y, Ov4Speed),
+    overlay_knobs!(Ov5Opacity, Ov5Size, Ov5X, Ov5Y, Ov5Speed),
+    overlay_knobs!(Ov6Opacity, Ov6Size, Ov6X, Ov6Y, Ov6Speed),
+    overlay_knobs!(Ov7Opacity, Ov7Size, Ov7X, Ov7Y, Ov7Speed),
+    overlay_knobs!(Ov8Opacity, Ov8Size, Ov8X, Ov8Y, Ov8Speed),
 ];
 
 /// The background loads of a slot. Decoding takes seconds and can finish in any order: only the
@@ -253,6 +258,12 @@ impl OverlayPanel<'_> {
             })
             .response
             .on_hover_text(MODE_HELP[o.mode as usize]);
+            ui.end_row();
+            ui.label("Retourner");
+            ui.horizontal(|ui| {
+                ui.toggle_value(&mut o.flip_h, "Miroir");
+                ui.toggle_value(&mut o.flip_v, "Renverser");
+            });
             ui.end_row();
             ui.label("Longueur");
             ui.add_enabled_ui(bpm.is_some(), |ui| {
