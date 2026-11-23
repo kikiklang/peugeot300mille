@@ -3,7 +3,6 @@
 //! * wear: luma loses bandwidth, colour is carried low ("colour under") so it smears and lags,
 //!   hue wobbles from line to line, FM noise streaks,
 //! * tracking: a band of noise that drifts up the picture; inside it, sync is lost too,
-//! * dropouts: oxide missing on the tape gives white streaks, or the deck repeats the line above,
 //! * instability: lines wobble (timebase error), the top of each field bends (flagging) and the
 //!   head switch shows a few lines above the bottom.
 
@@ -11,14 +10,17 @@ use super::signal::*;
 use crate::params::Params;
 use rayon::prelude::*;
 
+/// Below this knob value the deck fades in, instead of its filters switching on at once.
+const FADE_IN: f32 = 0.05;
+
 /// The knobs worked out for the current frame.
 #[derive(Clone, Copy, Default)]
 struct Setup {
     wear: f32,
     trk: f32,
-    drop: f32,
     inst: f32,
-    streaks: f32,
+    /// How much of the deck is heard: rises from 0 so that no knob jumps when it leaves zero.
+    wet: f32,
     a_y: f32,
     a_c: f32,
     y_noise: f32,
@@ -27,7 +29,6 @@ struct Setup {
 }
 
 pub struct Vhs {
-    prev: Vec<f32>,
     line: Vec<f32>,
     y: Vec<f32>,
     /// Scratch for the second sideways shift.
@@ -48,7 +49,6 @@ pub struct Vhs {
 impl Vhs {
     pub fn new() -> Self {
         Self {
-            prev: vec![BLANK; SPL],
             line: vec![0.0; SPL],
             y: vec![0.0; SPL],
             scratch: vec![0.0; SPL],
@@ -66,7 +66,7 @@ impl Vhs {
     }
 
     pub fn active(p: &Params) -> bool {
-        p.vhs_wear > 0.0 || p.vhs_tracking > 0.0 || p.vhs_dropouts > 0.0 || p.vhs_jitter > 0.0 || p.vhs_streaks > 0.0
+        p.vhs_wear > 0.0 || p.vhs_tracking > 0.0 || p.vhs_jitter > 0.0
     }
 
     /// Readies a frame, to be fed in order through [`Vhs::run`].
@@ -74,23 +74,24 @@ impl Vhs {
         self.frame = self.frame.wrapping_add(1);
         let wear = p.vhs_wear;
         let trk = p.vhs_tracking;
-        let streaks = p.vhs_streaks;
+        let inst = p.vhs_jitter;
         self.rng = Rng(0x2545_f491 ^ self.frame.wrapping_mul(0x9e37_79b9) | 1);
 
         let a_y = rc(3.4e6 * (1.8 / 3.4f64).powf(wear as f64)); // luma bandwidth
         let a_c = rc(1.0e6 * (0.3 / 1.0f64).powf(wear as f64)); // colour-under bandwidth
         let y_noise = 0.004 + 0.05 * wear;
         // Tracking band drifts slowly; its height grows with the error.
-        self.band = (self.band + 0.004 + 0.01 * trk.max(streaks)).fract();
-        let band_h = 5.0 + 32.0 * trk.max(streaks);
+        self.band = (self.band + 0.004 + 0.01 * trk).fract();
+        let band_h = 5.0 + 32.0 * trk;
         let band_c = self.band * LINES as f32;
-        self.setup = Setup { wear, trk, drop: p.vhs_dropouts, inst: p.vhs_jitter, streaks, a_y, a_c, y_noise, band_h, band_c };
+        let wet = (wear.max(trk).max(inst) / FADE_IN).min(1.0);
+        self.setup = Setup { wear, trk, inst, wet, a_y, a_c, y_noise, band_h, band_c };
     }
 
     /// A block of whole lines starting at line `l0`. `abs0` is the absolute index of the frame's
     /// first sample (keeps the subcarrier phase).
     pub fn run(&mut self, sig: &mut [f32], l0: usize, abs0: i64) {
-        let Setup { wear, trk, drop, inst, streaks, a_y, a_c, y_noise, band_h, band_c } = self.setup;
+        let Setup { wear, trk, inst, wet, a_y, a_c, y_noise, band_h, band_c } = self.setup;
         let mut rng = self.rng;
         let n_lines = sig.len() / SPL;
 
@@ -151,12 +152,10 @@ impl Vhs {
             }
 
             // --- Tracking band (wraps round the frame): the heads leave the track, so lines slip
-            // sideways, colour is lost and sync weakens (the TV tears there). The white streaks
-            // that run through the band are a separate knob.
+            // sideways, colour is lost and sync weakens (the TV tears there).
             let mut d = (l as f32 - band_c).abs();
             d = d.min(LINES as f32 - d);
-            let in_band = (trk > 0.0 || streaks > 0.0) && d < band_h;
-            if in_band && trk > 0.0 {
+            if trk > 0.0 && d < band_h {
                 let strength = (trk.powf(0.9) * (1.3 - d / band_h)).min(1.0);
                 // Colour gone: back to luma only.
                 for (v, y) in self.line.iter_mut().zip(&self.y) {
@@ -176,43 +175,13 @@ impl Vhs {
                     }
                 }
             }
-            if in_band && streaks > 0.0 {
-                let strength = 0.8 * streaks.powf(1.5) * (1.0 - d / band_h);
-                let mut k = 0;
-                while k < SPL {
-                    let run = 4 + (rng.unit() * 60.0) as usize;
-                    if rng.unit() < strength {
-                        let lvl = BLACK + 0.2 + rng.unit() * 0.6;
-                        for v in self.line[k..(k + run).min(SPL)].iter_mut() {
-                            *v = lvl + rng.tri() * 0.15;
-                        }
-                    }
-                    k += run;
+            if wet >= 1.0 {
+                sig[b..b + SPL].copy_from_slice(&self.line);
+            } else {
+                for (v, l) in sig[b..b + SPL].iter_mut().zip(&self.line) {
+                    *v += (l - *v) * wet;
                 }
             }
-            if near_switch && streaks > 0.3 {
-                for v in self.line[..SPL / 3].iter_mut() {
-                    *v = BLACK + 0.3 + rng.tri() * 0.3 * trk;
-                }
-            }
-
-            // --- Dropouts: a white streak, or the line above repeated by the compensator.
-            if drop > 0.0 && rng.unit() < drop * 0.12 {
-                let start = ACT0 + (rng.unit() * (W as f32 - 20.0)) as usize;
-                let len = 10 + (rng.unit() * rng.unit() * 360.0 * (0.3 + drop)) as usize;
-                let end = (start + len).min(ACT0 + W);
-                if rng.unit() < 0.55 {
-                    for v in self.line[start..end].iter_mut() {
-                        *v = 0.85 + rng.tri() * 0.12;
-                    }
-                } else {
-                    let (dst, src) = (&mut self.line[start..end], &self.prev[start..end]);
-                    dst.copy_from_slice(src);
-                }
-            }
-
-            sig[b..b + SPL].copy_from_slice(&self.line);
-            self.prev.copy_from_slice(&self.line);
         }
         self.rng = rng;
     }

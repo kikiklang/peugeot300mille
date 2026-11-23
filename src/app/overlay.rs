@@ -4,7 +4,8 @@ use super::link::{lock, Link};
 use crate::download::{Download, DownloadSlot};
 use crate::engine::overlay::{Clip, LOOP_BEATS, MAX_SECONDS, MODES, MODE_HELP, PLACES};
 use crate::engine::signal::TV_FPS;
-use crate::params::Params;
+use crate::knob::Knob;
+use crate::params::{KnobRow, Params};
 use crate::player::{Cmd, OverlayInfo};
 use crate::ui::{self, knob_grid, ACCENT, WEAK};
 use eframe::egui::{self, RichText};
@@ -16,17 +17,21 @@ use std::time::Duration;
 const LOOP_FILES: [&str; 8] = ["mp4", "mov", "mkv", "webm", "avi", "gif", "png", "m4v"];
 
 macro_rules! overlay_knobs {
-    ($n:literal) => {
+    ($opacity:ident, $size:ident, $x:ident, $y:ident, $speed:ident) => {
         [
-            (concat!("ov", $n, "_opacity"), "Opacité", "Transparence du calque."),
-            (concat!("ov", $n, "_size"), "Taille", "Hauteur du calque par rapport à l'image."),
-            (concat!("ov", $n, "_x"), "Position X", "Gauche (-1) à droite (+1)."),
-            (concat!("ov", $n, "_y"), "Position Y", "Bas (-1) à haut (+1)."),
-            (concat!("ov", $n, "_speed"), "Vitesse", "Vitesse de lecture de la boucle (négatif = à l'envers)."),
+            (Knob::$opacity, "Opacité", "Transparence du calque."),
+            (Knob::$size, "Taille", "Hauteur du calque par rapport à l'image."),
+            (Knob::$x, "Position X", "Gauche (-1) à droite (+1)."),
+            (Knob::$y, "Position Y", "Bas (-1) à haut (+1)."),
+            (Knob::$speed, "Vitesse", "Vitesse de lecture de la boucle (négatif = à l'envers)."),
         ]
     };
 }
-const OVERLAY_KNOBS: [[(&str, &str, &str); 5]; 3] = [overlay_knobs!("1"), overlay_knobs!("2"), overlay_knobs!("3")];
+const OVERLAY_KNOBS: [[KnobRow; 5]; 3] = [
+    overlay_knobs!(Ov1Opacity, Ov1Size, Ov1X, Ov1Y, Ov1Speed),
+    overlay_knobs!(Ov2Opacity, Ov2Size, Ov2X, Ov2Y, Ov2Speed),
+    overlay_knobs!(Ov3Opacity, Ov3Size, Ov3X, Ov3Y, Ov3Speed),
+];
 
 /// The background loads of a slot. Decoding takes seconds and can finish in any order: only the
 /// latest request may reach the player, so a slow old load can't replace a newer loop or refill

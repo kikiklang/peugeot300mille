@@ -7,6 +7,7 @@ mod app;
 mod audio;
 mod download;
 mod engine;
+mod knob;
 mod media;
 mod params;
 mod player;

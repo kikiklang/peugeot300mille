@@ -3,7 +3,8 @@
 use super::transport::fmt_time;
 use super::view::View;
 use crate::audio::{bin_freq, freq_bin, N_BANDS, N_GLOBAL, SOURCES, SPEC_BINS};
-use crate::params::{Band, Params, BAND_HINTS, KNOBS, SOUND_PRESETS};
+use crate::knob::DRIVEN;
+use crate::params::{Band, Params, BAND_HINTS, SOUND_PRESETS};
 use crate::ui::{self, card, ACCENT, WEAK};
 use eframe::egui::{self, RichText};
 
@@ -119,13 +120,13 @@ pub fn sound_tab(ui: &mut egui::Ui, p: &mut Params, st: &View, bands: &mut BandP
     card(ui, "Liens actifs", "Ce qui est branché sur quoi.", |ui| {
         let mut any = false;
         egui::Grid::new("links").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
-            for (k, (name, _, _)) in KNOBS.iter().enumerate() {
+            for (k, &knob) in DRIVEN.iter().enumerate() {
                 let m = p.mods[k];
                 if m.source == 0 {
                     continue;
                 }
                 any = true;
-                ui.label(ui::knob_label(name));
+                ui.label(ui::knob_label(knob));
                 ui.label(RichText::new(format!("← {}  {:+.2}", SOURCES[m.source as usize], m.depth)).color(ACCENT));
                 if ui.small_button("Couper").clicked() {
                     p.mods[k].source = 0;

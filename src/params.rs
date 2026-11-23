@@ -1,4 +1,6 @@
+use crate::knob::{Knob, DRIVEN, N_DRIVEN};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 
 /// A knob driven by the sound: `source` indexes [`crate::audio::SOURCES`] (0 = none),
 /// `depth` in -1..1 is how far the sound pushes the knob.
@@ -77,9 +79,6 @@ impl Default for Overlay {
     }
 }
 
-/// Number of knobs the sound can drive.
-pub const N_KNOBS: usize = 35;
-
 /// The knobs of the box. Every control starts at 0, which is a clean pass through the circuit.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -102,9 +101,7 @@ pub struct Params {
     // VHS deck.
     pub vhs_wear: f32,
     pub vhs_tracking: f32,
-    pub vhs_dropouts: f32,
     pub vhs_jitter: f32,
-    pub vhs_streaks: f32,
     // Camera loop.
     pub mix: f32,
     pub blur: f32,
@@ -136,9 +133,9 @@ pub struct Params {
     // Output.
     /// How much of the output LUT is applied (0..1).
     pub lut_out_amount: f32,
-    /// How each knob follows the sound, in [`KNOBS`] order.
-    #[serde(deserialize_with = "lenient_mods", serialize_with = "mods_as_list")]
-    pub mods: [Mod; N_KNOBS],
+    /// How each knob follows the sound, in [`DRIVEN`] order. Saved by knob name.
+    #[serde(deserialize_with = "saved_mods", serialize_with = "mods_by_name")]
+    pub mods: [Mod; N_DRIVEN],
     /// The three overlay slots.
     pub overlays: [Overlay; 3],
     /// Overall strength of the sound's influence (0..2).
@@ -169,9 +166,7 @@ impl Default for Params {
             sync: 0.0,
             vhs_wear: 0.0,
             vhs_tracking: 0.0,
-            vhs_dropouts: 0.0,
             vhs_jitter: 0.0,
-            vhs_streaks: 0.0,
             mix: 0.0,
             blur: 0.0,
             color: 0.0,
@@ -194,7 +189,7 @@ impl Default for Params {
             lens_moire: 0.0,
             mirror: 0,
             lut_out_amount: 1.0,
-            mods: [Mod::default(); N_KNOBS],
+            mods: [Mod::default(); N_DRIVEN],
             overlays: [Overlay::default(); 3],
             sound_amount: 1.0,
             bands: DEFAULT_BANDS,
@@ -205,120 +200,100 @@ impl Default for Params {
     }
 }
 
-fn mods_as_list<S: Serializer>(m: &[Mod; N_KNOBS], s: S) -> Result<S::Ok, S::Error> {
-    s.collect_seq(m.iter())
-}
-
-/// Older saved settings have fewer entries: missing ones are "not driven".
-fn lenient_mods<'de, D: Deserializer<'de>>(d: D) -> Result<[Mod; N_KNOBS], D::Error> {
-    let v: Vec<Mod> = Vec::deserialize(d)?;
-    let mut out = [Mod::default(); N_KNOBS];
-    for (o, m) in out.iter_mut().zip(v) {
-        *o = m;
-    }
-    Ok(out)
-}
-
-/// Knobs the sound can drive, in modulation order, with their range. New knobs go at the end so
-/// saved settings keep their links.
-pub const KNOBS: [(&str, f32, f32); N_KNOBS] = [
-    ("enhancer_gain", 0.0, 1.0),
-    ("enhancer_tone", 0.0, 1.0),
-    ("feedback_gain", 0.0, 1.0),
-    ("feedback_tone", 0.0, 1.0),
-    ("sync", 0.0, 1.0),
-    ("mix", 0.0, 1.0),
-    ("blur", 0.0, 1.0),
-    ("color", 0.0, 1.0),
-    ("noise", 0.0, 1.0),
-    ("vhs_wear", 0.0, 1.0),
-    ("vhs_tracking", 0.0, 1.0),
-    ("vhs_dropouts", 0.0, 1.0),
-    ("vhs_jitter", 0.0, 1.0),
-    ("cam_pan", -1.0, 1.0),
-    ("cam_tilt", -1.0, 1.0),
-    ("cam_zoom", -1.0, 1.0),
-    ("cam_rotate", -1.0, 1.0),
-    ("cam_drift", 0.0, 1.0),
-    ("cam_shake", 0.0, 1.0),
-    ("cam_hue", -1.0, 1.0),
-    ("cam_negative", 0.0, 1.0),
-    ("tube_lag", 0.0, 1.0),
-    ("tube_bloom", 0.0, 1.0),
-    ("tube_burn", 0.0, 1.0),
-    ("lens_fisheye", -1.0, 1.0),
-    ("lens_vignette", 0.0, 1.0),
-    ("lens_ca", 0.0, 1.0),
-    ("lens_moire", 0.0, 1.0),
-    ("vhs_streaks", 0.0, 1.0),
-    ("ov1_opacity", 0.0, 1.0),
-    ("ov1_size", 0.0, 1.0),
-    ("ov2_opacity", 0.0, 1.0),
-    ("ov2_size", 0.0, 1.0),
-    ("ov3_opacity", 0.0, 1.0),
-    ("ov3_size", 0.0, 1.0),
+/// Up to v0.8 the links were saved as a plain list in this order. Frozen: it is what reads those
+/// files back, including the links of knobs that no longer exist.
+const LINKS_V08: [&str; 35] = [
+    "enhancer_gain", "enhancer_tone", "feedback_gain", "feedback_tone", "sync", "mix", "blur", "color", "noise",
+    "vhs_wear", "vhs_tracking", "vhs_dropouts", "vhs_jitter", "cam_pan", "cam_tilt", "cam_zoom", "cam_rotate",
+    "cam_drift", "cam_shake", "cam_hue", "cam_negative", "tube_lag", "tube_bloom", "tube_burn", "lens_fisheye",
+    "lens_vignette", "lens_ca", "lens_moire", "vhs_streaks", "ov1_opacity", "ov1_size", "ov2_opacity", "ov2_size",
+    "ov3_opacity", "ov3_size",
 ];
 
-pub fn knob_index(name: &str) -> usize {
-    KNOBS.iter().position(|k| k.0 == name).unwrap_or_else(|| panic!("unknown knob {name}"))
+fn mods_by_name<S: Serializer>(mods: &[Mod; N_DRIVEN], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_map(DRIVEN.iter().zip(mods).filter(|(_, m)| **m != Mod::default()).map(|(k, m)| (k.name(), m)))
+}
+
+/// Links by name, or the positional list of older files. A knob that is gone loses its link.
+fn saved_mods<'de, D: Deserializer<'de>>(d: D) -> Result<[Mod; N_DRIVEN], D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        ByName(HashMap<String, Mod>),
+        ByPosition(Vec<Mod>),
+    }
+    let links: Vec<(String, Mod)> = match Saved::deserialize(d)? {
+        Saved::ByName(map) => map.into_iter().collect(),
+        Saved::ByPosition(list) => LINKS_V08.iter().map(|n| n.to_string()).zip(list).collect(),
+    };
+    let mut out = [Mod::default(); N_DRIVEN];
+    for (name, m) in links {
+        if let Some(slot) = Knob::from_name(&name).and_then(Knob::driven_slot) {
+            out[slot] = m;
+        }
+    }
+    Ok(out)
 }
 
 /// Mirrors in front of the camera lens.
 pub const MIRRORS: [&str; 6] = ["Aucun", "Miroir gauche/droite", "Miroir haut/bas", "Quatre miroirs", "Kaléidoscope 6", "Kaléidoscope 8"];
 
-/// Camera sub-groups for the UI: (title, [(field, label, help)]).
-pub const CAM_GROUPS: [(&str, &[(&str, &str, &str)]); 4] = [
+/// A slider in the panel: (knob, label, help).
+pub type KnobRow = (Knob, &'static str, &'static str);
+
+/// Camera sub-groups for the UI: (title, rows).
+pub const CAM_GROUPS: [(&str, &[KnobRow]); 4] = [
     (
         "Cadrage",
         &[
-            ("cam_pan", "Pan", "Tourne la caméra à gauche / à droite (s'ajoute à la position choisie)."),
-            ("cam_tilt", "Tilt", "Lève / baisse la caméra."),
-            ("cam_zoom", "Zoom", "Positif = zoom avant : le tunnel s'ouvre ; négatif = il se creuse."),
-            ("cam_rotate", "Rotation", "Fait tourner la caméra : la spirale tourne à chaque passage."),
-            ("cam_drift", "Dérive", "Le pied n'est pas fixe : la caméra glisse lentement toute seule."),
-            ("cam_shake", "Secousses", "Caméra à l'épaule. Branchée sur les attaques, elle encaisse les coups."),
+            (Knob::CamPan, "Pan", "Tourne la caméra à gauche / à droite (s'ajoute à la position choisie)."),
+            (Knob::CamTilt, "Tilt", "Lève / baisse la caméra."),
+            (Knob::CamZoom, "Zoom", "Positif = zoom avant : le tunnel s'ouvre ; négatif = il se creuse."),
+            (Knob::CamRotate, "Rotation", "Fait tourner la caméra : la spirale tourne à chaque passage."),
+            (Knob::CamDrift, "Dérive", "Le pied n'est pas fixe : la caméra glisse lentement toute seule."),
+            (Knob::CamShake, "Secousses", "Caméra à l'épaule. Branchée sur les attaques, elle encaisse les coups."),
         ],
     ),
     (
         "Couleur par passage",
         &[
-            ("cam_hue", "Teinte / passage", "La teinte tourne un peu à chaque tour de boucle : tunnels arc-en-ciel."),
-            ("cam_negative", "Négatif", "Inverseur de polarité : chaque passage inverse la lumière (les couleurs restent)."),
+            (Knob::CamHue, "Teinte / passage", "La teinte tourne un peu à chaque tour de boucle : tunnels arc-en-ciel."),
+            (Knob::CamNegative, "Négatif", "Inverseur de polarité : chaque passage inverse la lumière (les couleurs restent)."),
         ],
     ),
     (
         "Tube",
         &[
-            ("tube_lag", "Traînées", "Rémanence du tube : les lumières laissent des queues de comète."),
-            ("tube_bloom", "Halo", "Les hautes lumières bavent autour d'elles."),
-            ("tube_burn", "Marquage", "Ce qui reste longtemps à l'image s'imprime en fantôme."),
+            (Knob::TubeLag, "Traînées", "Rémanence du tube : les lumières laissent des queues de comète."),
+            (Knob::TubeBloom, "Halo", "Les hautes lumières bavent autour d'elles."),
+            (Knob::TubeBurn, "Marquage", "Ce qui reste longtemps à l'image s'imprime en fantôme."),
         ],
     ),
     (
         "Optique",
         &[
-            ("lens_fisheye", "Fisheye", "Positif = grand-angle bombé, négatif = coussinet."),
-            ("lens_vignette", "Vignettage", "Les bords et les coins s'assombrissent."),
-            ("lens_ca", "Aberration", "Franges colorées sur les bords (en plus de l'aberration d'origine)."),
-            ("lens_moire", "Moiré", "La caméra voit les lignes et la grille de l'écran : franges de moiré."),
+            (Knob::LensFisheye, "Fisheye", "Positif = grand-angle bombé, négatif = coussinet."),
+            (Knob::LensVignette, "Vignettage", "Les bords et les coins s'assombrissent."),
+            (Knob::LensCa, "Aberration", "Franges colorées sur les bords (en plus de l'aberration d'origine)."),
+            (Knob::LensMoire, "Moiré", "La caméra voit les lignes et la grille de l'écran : franges de moiré."),
         ],
     ),
 ];
 
 /// Ready-made sound reactions: (name, [(knob, source, depth)]).
-pub const SOUND_PRESETS: [(&str, &[(&str, u8, f32)]); 7] = [
+pub const SOUND_PRESETS: [(&str, &[(Knob, u8, f32)]); 7] = [
     ("Aucun", &[]),
     // Sources: 1 volume, 5 attacks, 6 band 1 (kick), 7 band 2 (snare), 8 band 3 (voice), 9 band 4 (hi-hat).
-    ("Pulse sur le kick", &[("feedback_gain", 6, 0.45), ("enhancer_gain", 6, 0.35), ("blur", 6, 0.15)]),
-    ("Tunnel qui respire", &[("mix", 1, 0.35), ("color", 8, 0.3), ("blur", 6, 0.25)]),
-    ("Télé qui décroche", &[("sync", 7, 0.45), ("noise", 9, 0.35), ("feedback_gain", 6, 0.2)]),
-    ("Cassette malmenée", &[("vhs_dropouts", 7, 0.6), ("vhs_tracking", 6, 0.4), ("vhs_jitter", 9, 0.5)]),
+    ("Pulse sur le kick", &[(Knob::FeedbackGain, 6, 0.45), (Knob::EnhancerGain, 6, 0.35), (Knob::Blur, 6, 0.15)]),
+    ("Tunnel qui respire", &[(Knob::Mix, 1, 0.35), (Knob::Color, 8, 0.3), (Knob::Blur, 6, 0.25)]),
+    ("Télé qui décroche", &[(Knob::Sync, 7, 0.45), (Knob::Noise, 9, 0.35), (Knob::FeedbackGain, 6, 0.2)]),
+    ("Cassette malmenée", &[(Knob::VhsWear, 7, 0.6), (Knob::VhsTracking, 6, 0.4), (Knob::VhsJitter, 9, 0.5)]),
     (
         "Tout réagit",
-        &[("feedback_gain", 6, 0.4), ("enhancer_gain", 9, 0.4), ("sync", 7, 0.3), ("mix", 1, 0.3), ("noise", 9, 0.25), ("vhs_dropouts", 5, 0.4)],
+        &[(Knob::FeedbackGain, 6, 0.4), (Knob::EnhancerGain, 9, 0.4), (Knob::Sync, 7, 0.3), (Knob::Mix, 1, 0.3), (Knob::Noise, 9, 0.25), (Knob::VhsJitter, 5, 0.4)],
     ),
     // Sources: 11 pulse each beat, 13 pulse each 4 beats, 15 slow wave over 4 beats.
-    ("Calé sur le tempo", &[("feedback_gain", 11, 0.4), ("enhancer_gain", 11, 0.25), ("sync", 13, 0.3), ("color", 15, 0.3)]),
+    ("Calé sur le tempo", &[(Knob::FeedbackGain, 11, 0.4), (Knob::EnhancerGain, 11, 0.25), (Knob::Sync, 13, 0.3), (Knob::Color, 15, 0.3)]),
 ];
 
 /// Where the camera stands: name and (pan, tilt, zoom, roll), each in -1..1.
@@ -334,110 +309,55 @@ pub const CAMERAS: [(&str, [f32; 4]); 9] = [
     ("Zoom Out + Roll Left", [0.0, 0.0, -1.0, -1.0]),
 ];
 
-/// Input processor sliders: (field, label, help, min, max).
-pub const INPUT_KNOBS: [(&str, &str, &str, f32, f32); 5] = [
-    ("brightness", "Luminosité", "Remonte ou baisse toute l'image.", -1.0, 1.0),
-    ("contrast", "Contraste", "Écarte ou rapproche les noirs et les blancs.", -1.0, 1.0),
-    ("gamma", "Gamma", "Éclaircit (positif) ou assombrit (négatif) les tons moyens, sans toucher aux extrêmes.", -1.0, 1.0),
-    ("saturation", "Saturation", "-1 = noir et blanc, +1 = couleurs doublées.", -1.0, 1.0),
-    ("hue", "Teinte", "Fait tourner toutes les couleurs (degrés).", -180.0, 180.0),
+/// Input processor sliders.
+pub const INPUT_KNOBS: [KnobRow; 5] = [
+    (Knob::Brightness, "Luminosité", "Remonte ou baisse toute l'image."),
+    (Knob::Contrast, "Contraste", "Écarte ou rapproche les noirs et les blancs."),
+    (Knob::Gamma, "Gamma", "Éclaircit (positif) ou assombrit (négatif) les tons moyens, sans toucher aux extrêmes."),
+    (Knob::Saturation, "Saturation", "-1 = noir et blanc, +1 = couleurs doublées."),
+    (Knob::Hue, "Teinte", "Fait tourner toutes les couleurs (degrés)."),
 ];
 
-/// (field name, label, help) for the 0..1 sliders, in UI order.
-pub const AMP_KNOBS: [(&str, &str, &str); 5] = [
-    ("enhancer_gain", "Enhancer Gain", "How strongly the enhancer boosts edges. Up high, edges ring and oscillate."),
-    ("enhancer_tone", "Enhancer Tone", "How wide the edges it boosts are."),
-    ("feedback_gain", "Feedback Gain", "How much of the output goes back to the input. Never fully off."),
-    ("feedback_tone", "Feedback Tone", "How wide the changes fed back are. Up high, brightness itself is fed back."),
-    ("sync", "Sync", "Sync mixer: locked → rolling → lifting to white → white with grain → snow → sinking to black. 0 = out."),
+pub const AMP_KNOBS: [KnobRow; 5] = [
+    (Knob::EnhancerGain, "Enhancer Gain", "How strongly the enhancer boosts edges. Up high, edges ring and oscillate."),
+    (Knob::EnhancerTone, "Enhancer Tone", "How wide the edges it boosts are."),
+    (Knob::FeedbackGain, "Feedback Gain", "How much of the output goes back to the input. Never fully off."),
+    (Knob::FeedbackTone, "Feedback Tone", "How wide the changes fed back are. Up high, brightness itself is fed back."),
+    (Knob::Sync, "Sync", "Sync mixer: locked → rolling → lifting to white → white with grain → snow → sinking to black. 0 = out."),
 ];
 
-pub const VHS_KNOBS: [(&str, &str, &str); 5] = [
-    ("vhs_wear", "Usure", "Bande fatiguée : image moins nette, couleur qui bave et traîne derrière, teinte qui frémit, souffle."),
-    ("vhs_tracking", "Tracking", "Réglage de piste raté : une bande où l'image glisse, perd sa couleur et se déchire."),
-    ("vhs_streaks", "Traits", "Les traits blancs qui défilent dans la bande de tracking."),
-    ("vhs_dropouts", "Drop-outs", "Manques d'oxyde : traits blancs, ou ligne du dessus répétée."),
-    ("vhs_jitter", "Instabilité", "Lignes qui tremblent, haut de l'image qui ondule, commutation des têtes visible en bas."),
+pub const VHS_KNOBS: [KnobRow; 3] = [
+    (Knob::VhsWear, "Usure", "Bande fatiguée : image moins nette, couleur qui bave et traîne derrière, teinte qui frémit, souffle."),
+    (Knob::VhsTracking, "Tracking", "Réglage de piste raté : une bande où l'image glisse, perd sa couleur et se déchire."),
+    (Knob::VhsJitter, "Instabilité", "Lignes qui tremblent, haut de l'image qui ondule, commutation des têtes visible en bas."),
 ];
 
-pub const CAM_KNOBS: [(&str, &str, &str); 4] = [
-    ("mix", "Mix", "How much of the camera's picture of the screen is mixed back. 0 = camera out."),
-    ("blur", "Blur", "The lens's blur: fine detail dies and only broad light travels round."),
-    ("color", "Color", "How much colour the camera gives back (0 normal, 1 = +12 dB)."),
-    ("noise", "Noise", "The camera's gain turned up by hand, and the grain that comes with it."),
+pub const CAM_KNOBS: [KnobRow; 4] = [
+    (Knob::Mix, "Mix", "How much of the camera's picture of the screen is mixed back. 0 = camera out."),
+    (Knob::Blur, "Blur", "The lens's blur: fine detail dies and only broad light travels round."),
+    (Knob::Color, "Color", "How much colour the camera gives back (0 normal, 1 = +12 dB)."),
+    (Knob::Noise, "Noise", "The camera's gain turned up by hand, and the grain that comes with it."),
 ];
 
 impl Params {
-    pub fn knob_mut(&mut self, name: &str) -> &mut f32 {
-        match name {
-            "brightness" => &mut self.brightness,
-            "contrast" => &mut self.contrast,
-            "gamma" => &mut self.gamma,
-            "saturation" => &mut self.saturation,
-            "hue" => &mut self.hue,
-            "lut_in_amount" => &mut self.lut_in_amount,
-            "enhancer_gain" => &mut self.enhancer_gain,
-            "enhancer_tone" => &mut self.enhancer_tone,
-            "feedback_gain" => &mut self.feedback_gain,
-            "feedback_tone" => &mut self.feedback_tone,
-            "sync" => &mut self.sync,
-            "vhs_wear" => &mut self.vhs_wear,
-            "vhs_tracking" => &mut self.vhs_tracking,
-            "vhs_dropouts" => &mut self.vhs_dropouts,
-            "vhs_jitter" => &mut self.vhs_jitter,
-            "vhs_streaks" => &mut self.vhs_streaks,
-            "mix" => &mut self.mix,
-            "blur" => &mut self.blur,
-            "color" => &mut self.color,
-            "noise" => &mut self.noise,
-            "lut_out_amount" => &mut self.lut_out_amount,
-            "cam_pan" => &mut self.cam_pan,
-            "cam_tilt" => &mut self.cam_tilt,
-            "cam_zoom" => &mut self.cam_zoom,
-            "cam_rotate" => &mut self.cam_rotate,
-            "cam_drift" => &mut self.cam_drift,
-            "cam_shake" => &mut self.cam_shake,
-            "cam_hue" => &mut self.cam_hue,
-            "cam_negative" => &mut self.cam_negative,
-            "tube_lag" => &mut self.tube_lag,
-            "tube_bloom" => &mut self.tube_bloom,
-            "tube_burn" => &mut self.tube_burn,
-            "lens_fisheye" => &mut self.lens_fisheye,
-            "lens_vignette" => &mut self.lens_vignette,
-            "lens_ca" => &mut self.lens_ca,
-            "lens_moire" => &mut self.lens_moire,
-            n if n.starts_with("ov") && n.len() > 4 => {
-                let i = (n.as_bytes()[2] - b'1') as usize;
-                let o = &mut self.overlays[i.min(2)];
-                match &n[4..] {
-                    "opacity" => &mut o.opacity,
-                    "size" => &mut o.size,
-                    "x" => &mut o.x,
-                    "y" => &mut o.y,
-                    "speed" => &mut o.speed,
-                    _ => panic!("unknown knob {name}"),
-                }
-            }
-            _ => panic!("unknown knob {name}"),
-        }
-    }
-
     /// Applies a sound-reaction preset (keeps the knobs' own values).
     pub fn set_sound_preset(&mut self, i: usize) {
-        self.mods = [Mod::default(); N_KNOBS];
-        for &(name, source, depth) in SOUND_PRESETS[i].1 {
-            self.mods[knob_index(name)] = Mod { source, depth };
+        self.mods = [Mod::default(); N_DRIVEN];
+        for &(knob, source, depth) in SOUND_PRESETS[i].1 {
+            if let Some(slot) = knob.driven_slot() {
+                self.mods[slot] = Mod { source, depth };
+            }
         }
     }
 
     /// The knobs as the sound pushes them this frame. `feat` = volume, bass, mid, treble, hits.
     pub fn modulated(&self, feat: &[f32; crate::audio::N_FEAT]) -> Params {
         let mut p = *self;
-        for (k, m) in self.mods.iter().enumerate() {
+        for (knob, m) in DRIVEN.iter().zip(&self.mods) {
             if m.source > 0 && m.depth != 0.0 {
                 let f = feat[(m.source as usize - 1).min(feat.len() - 1)];
-                let (name, lo, hi) = KNOBS[k];
-                *p.knob_mut(name) += m.depth * f * self.sound_amount * (hi - lo);
+                let (lo, hi) = knob.range();
+                *knob.get_mut(&mut p) += m.depth * f * self.sound_amount * (hi - lo);
             }
         }
         p.clamped()
@@ -445,29 +365,19 @@ impl Params {
 
     pub fn clamped(mut self) -> Self {
         self.replace_nan();
-        for (name, lo, hi) in KNOBS {
-            let v = self.knob_mut(name);
+        for knob in Knob::ALL {
+            let (lo, hi) = knob.range();
+            let v = knob.get_mut(&mut self);
             *v = v.clamp(lo, hi);
         }
         self.mirror = self.mirror.min(MIRRORS.len() as u8 - 1);
         for o in self.overlays.iter_mut() {
-            o.opacity = o.opacity.clamp(0.0, 1.0);
-            o.size = o.size.clamp(0.0, 1.0);
-            o.x = o.x.clamp(-1.0, 1.0);
-            o.y = o.y.clamp(-1.0, 1.0);
-            o.speed = o.speed.clamp(-4.0, 4.0);
             o.mode = o.mode.min(crate::engine::overlay::MODES.len() as u8 - 1);
             o.place = o.place.min(1);
             if !crate::engine::overlay::LOOP_BEATS.contains(&o.beats) {
                 o.beats = 0;
             }
         }
-        for (name, _, _, lo, hi) in INPUT_KNOBS {
-            let v = self.knob_mut(name);
-            *v = v.clamp(lo, hi);
-        }
-        self.lut_in_amount = self.lut_in_amount.clamp(0.0, 1.0);
-        self.lut_out_amount = self.lut_out_amount.clamp(0.0, 1.0);
         self.camera = self.camera.min(CAMERAS.len() as u8 - 1);
         self.sound_amount = self.sound_amount.clamp(0.0, 2.0);
         for b in self.bands.iter_mut() {
@@ -489,11 +399,10 @@ impl Params {
     /// `clamp` lets NaN through, and one NaN in the feedback loop would stay in the picture for
     /// good: each one goes back to its default value.
     fn replace_nan(&mut self) {
-        let d = Params::default();
-        let names = KNOBS.iter().map(|k| k.0).chain(INPUT_KNOBS.iter().map(|k| k.0)).chain(["lut_in_amount", "lut_out_amount"]);
-        for name in names {
-            let fallback = *{ d }.knob_mut(name);
-            let v = self.knob_mut(name);
+        let mut d = Params::default();
+        for knob in Knob::ALL {
+            let fallback = *knob.get_mut(&mut d);
+            let v = knob.get_mut(self);
             if v.is_nan() {
                 *v = fallback;
             }
@@ -505,11 +414,6 @@ impl Params {
         };
         fix(&mut self.sound_amount, d.sound_amount);
         fix(&mut self.tempo_phase, d.tempo_phase);
-        for (o, od) in self.overlays.iter_mut().zip(&d.overlays) {
-            fix(&mut o.x, od.x);
-            fix(&mut o.y, od.y);
-            fix(&mut o.speed, od.speed);
-        }
         for (b, bd) in self.bands.iter_mut().zip(&d.bands) {
             fix(&mut b.lo, bd.lo);
             fix(&mut b.hi, bd.hi);
@@ -533,13 +437,36 @@ mod tests {
         let p: Params = serde_json::from_str(old).unwrap();
         assert_eq!(p.mix, 0.4);
         assert_eq!(p.mods[0], Mod { source: 1, depth: 0.5 });
-        assert_eq!(p.mods[N_KNOBS - 1], Mod::default());
+        assert_eq!(p.mods[N_DRIVEN - 1], Mod::default());
         assert_eq!(p.overlays, [Overlay::default(); 3]);
         assert_eq!(p.bands[0].sens, 0.0);
         assert_eq!(p.lut_in_amount, 1.0);
         // Longer lists than this version knows are cut, not refused.
-        let long = format!(r#"{{"mods":[{}]}}"#, vec![r#"{"source":2,"depth":0.1}"#; N_KNOBS + 5].join(","));
-        assert_eq!(serde_json::from_str::<Params>(&long).unwrap().mods[N_KNOBS - 1].source, 2);
+        let long = format!(r#"{{"mods":[{}]}}"#, vec![r#"{"source":2,"depth":0.1}"#; N_DRIVEN + 5].join(","));
+        assert_eq!(serde_json::from_str::<Params>(&long).unwrap().mods[N_DRIVEN - 1].source, 2);
+    }
+
+    #[test]
+    fn links_of_v08_files_stay_on_their_knob() {
+        let mut list = vec![r#"{"source":0,"depth":0.0}"#.to_string(); 35];
+        for (i, source) in [(10, 3), (11, 4), (12, 5), (28, 6), (29, 7)] {
+            list[i] = format!(r#"{{"source":{source},"depth":0.5}}"#);
+        }
+        let p: Params = serde_json::from_str(&format!(r#"{{"mods":[{}]}}"#, list.join(","))).unwrap();
+        let source = |k: Knob| p.mods[k.driven_slot().unwrap()].source;
+        assert_eq!(source(Knob::VhsTracking), 3);
+        assert_eq!(source(Knob::VhsJitter), 5, "must not slide when Drop-outs goes");
+        assert_eq!(source(Knob::Ov1Opacity), 7, "must not slide when Traits goes");
+        assert_eq!(p.mods.iter().filter(|m| m.source != 0).count(), 3, "links of removed knobs are dropped");
+    }
+
+    #[test]
+    fn links_are_saved_by_name() {
+        let mut p = Params::default();
+        p.mods[Knob::Sync.driven_slot().unwrap()] = Mod { source: 11, depth: 0.5 };
+        let json: serde_json::Value = serde_json::to_value(p).unwrap();
+        assert_eq!(json["mods"]["sync"]["source"], 11);
+        assert_eq!(json["mods"].as_object().unwrap().len(), 1);
     }
 
     #[test]

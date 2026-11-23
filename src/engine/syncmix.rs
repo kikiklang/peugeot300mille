@@ -5,6 +5,11 @@
 
 use super::signal::*;
 
+/// Below this knob value the mixer fades in, instead of switching on at once.
+const FADE_IN: f32 = 0.05;
+/// Knob value from which the colour burst is fully clipped.
+const BURST_CLIP_AT: f32 = 0.10;
+
 /// The knob worked out for the current frame.
 #[derive(Clone, Copy, Default)]
 struct Levels {
@@ -16,6 +21,10 @@ struct Levels {
     noise: f32,
     depth: f32,
     h_drop: f32,
+    /// How much of the mixer is in the signal.
+    wet: f32,
+    /// How much of the signal below blanking is clipped outside sync, burst included.
+    clip: f32,
 }
 
 pub struct SyncMix {
@@ -47,14 +56,16 @@ impl SyncMix {
         let noise = 0.06 * w_lsnow + 0.45 * w_snow * (1.0 - 0.5 * w_sink);
         let depth = BLANK * (1.0 - 0.75 * w_snow) * (1.0 - 0.9 * w_sink);
         let h_drop = 0.6 * w_snow;
-        self.levels = Levels { w_roll, a_src, gain, lift, sink, noise, depth, h_drop };
+        let wet = (u / FADE_IN).min(1.0);
+        let clip = smoothstep(0.0, BURST_CLIP_AT, u);
+        self.levels = Levels { w_roll, a_src, gain, lift, sink, noise, depth, h_drop, wet, clip };
         self.field_seen = [false; 2];
     }
 
     /// `sig` is a block of the amp's output starting at sample `a0` of the frame (modified in
     /// place), `src` the same block of the clean composite before the loop.
     pub fn run(&mut self, sig: &mut [f32], src: &[f32], tpl: &Template, a0: usize) {
-        let Levels { w_roll, a_src, gain, lift, sink, noise, depth, h_drop } = self.levels;
+        let Levels { w_roll, a_src, gain, lift, sink, noise, depth, h_drop, wet, clip } = self.levels;
         let mut st = self.rng;
         let (mut src_lp, mut keep_v) = (self.src_lp, self.keep_v);
         for (a, ((v, &s), &vi)) in (a0..).zip(sig.iter_mut().zip(src).zip(&tpl.vi[a0..])) {
@@ -65,14 +76,18 @@ impl SyncMix {
                 keep_v = st.unit() >= w_roll;
             }
             src_lp += a_src * (s - src_lp);
-            let is_sync = src_lp < BLANK * 0.5 && (!vi || keep_v);
-            // The looped signal's own sync is stripped; the mixer's goes in instead.
-            let video = v.max(BLANK - 0.01);
+            let in_sync = src_lp < BLANK * 0.5;
+            let is_sync = in_sync && (!vi || keep_v);
+            // The looped signal's own sync is stripped; the mixer's goes in instead. The clip also
+            // bites the colour burst, which is what drains the picture to black and white as the
+            // knob rises: a wanted part of the look, brought in gradually from zero.
+            let clipped = v.max(BLANK - 0.01);
+            let video = if in_sync || clip >= 1.0 { clipped } else { *v + (clipped - *v) * clip };
             let mut out = (video - BLANK) * gain + BLANK + lift + sink + noise * st.tri();
             if is_sync && (h_drop == 0.0 || st.unit() >= h_drop * 0.02) {
                 out -= depth;
             }
-            *v = out;
+            *v = if wet >= 1.0 { out } else { *v + (out - *v) * wet };
         }
         (self.rng, self.src_lp, self.keep_v) = (st, src_lp, keep_v);
     }

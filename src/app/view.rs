@@ -29,7 +29,6 @@ pub struct View {
     pub file: Option<FileView>,
     pub time: f64,
     pub playing: bool,
-    pub live_rec: bool,
     pub auto_rec: bool,
     pub auto_frames: usize,
     pub has_automation: bool,
@@ -50,7 +49,6 @@ impl View {
         self.file = s.file.as_ref().map(|f| FileView { duration: f.duration, width: f.width, height: f.height });
         self.time = s.time;
         self.playing = s.playing;
-        self.live_rec = s.live_rec.is_some();
         self.auto_rec = s.auto_rec;
         self.auto_frames = s.auto_frames;
         self.has_automation = s.automation.is_some();

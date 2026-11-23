@@ -3,7 +3,7 @@
 
 use crate::audio::{Output, Sound, N_FEAT};
 use crate::engine::{lut::Lut, overlay::Clip, Engine};
-use crate::media::{lock, probe, Encoder, Probe};
+use crate::media::{lock, probe, Probe};
 use crate::params::Params;
 use crate::runner::{Automation, Runner};
 use std::path::PathBuf;
@@ -16,8 +16,6 @@ pub enum Cmd {
     Play,
     Pause,
     Seek(f64),
-    /// Start recording what is played to this file, or stop.
-    RecLive(Option<PathBuf>),
     /// Start or stop recording the knob movements.
     RecAuto(bool),
     /// Sets (or removes) the input or output LUT.
@@ -41,7 +39,6 @@ pub struct Status {
     pub file: Option<Probe>,
     pub time: f64,
     pub playing: bool,
-    pub live_rec: Option<PathBuf>,
     pub auto_rec: bool,
     pub auto_frames: usize,
     pub automation: Option<Automation>,
@@ -120,7 +117,6 @@ pub fn spawn(shared: Arc<Shared>, rx: Receiver<Cmd>, repaint: impl Fn() + Send +
                 luts: (None, None),
                 clips: [None, None, None],
                 playing: false,
-                live: None,
                 auto: None,
                 shown: Params::default(),
                 dirty_since: None,
@@ -145,7 +141,6 @@ struct Player {
     luts: (Option<Arc<Lut>>, Option<Arc<Lut>>),
     clips: [Option<Arc<Clip>>; 3],
     playing: bool,
-    live: Option<Encoder>,
     auto: Option<Automation>,
     shown: Params,
     dirty_since: Option<Instant>,
@@ -189,7 +184,6 @@ impl Player {
     fn handle(&mut self, c: Cmd) {
         match c {
             Cmd::Open(path) => {
-                self.stop_live();
                 self.auto = None;
                 lock(&self.shared.status).auto_rec = false;
                 self.halt();
@@ -249,7 +243,7 @@ impl Player {
             }
             Cmd::Seek(t) => {
                 if let Some(pr) = self.run.as_ref().map(|r| r.probe.clone()) {
-                    if self.live.is_some() || self.auto.is_some() {
+                    if self.auto.is_some() {
                         self.shared.say("Arrêtez l'enregistrement avant de vous déplacer.");
                         return;
                     }
@@ -259,21 +253,6 @@ impl Player {
                     self.play_t0 = None;
                 }
             }
-            Cmd::RecLive(Some(path)) => {
-                let Some(run) = self.run.as_ref() else { return };
-                let t = run.out_j as f64 / run.probe.fps();
-                match Encoder::open(&run.probe, &path, Some(t)) {
-                    Ok(e) => {
-                        self.live = Some(e);
-                        lock(&self.shared.status).live_rec = Some(path.clone());
-                        self.shared.say(format!("Enregistrement dans {}", path.display()));
-                        self.playing = true;
-                        self.play_t0 = None;
-                    }
-                    Err(e) => self.shared.say(format!("{e:#}")),
-                }
-            }
-            Cmd::RecLive(None) => self.stop_live(),
             Cmd::RecAuto(true) => {
                 let Some(run) = self.run.as_ref() else { return };
                 self.auto = Some(Automation {
@@ -439,7 +418,6 @@ impl Player {
             Ok(false) => {
                 // The track can be longer than the picture: it must not play on alone.
                 self.halt();
-                self.stop_live();
                 self.finish_auto();
                 self.shared.say("Fin de la vidéo.");
                 return;
@@ -453,13 +431,6 @@ impl Player {
         // The sound plays by itself from the card; here it is only started.
         if let (Some(snd), Some(out)) = (&self.sound, &self.out) {
             out.play(snd, (run.out_j - 1) as f64 / fps);
-        }
-        if let Some(enc) = self.live.as_mut() {
-            if let Err(e) = enc.write(&run.screen) {
-                self.shared.say(format!("{e:#}"));
-                self.live = None;
-                lock(&self.shared.status).live_rec = None;
-            }
         }
         if let Some(a) = self.auto.as_mut() {
             a.frames.push(p);
@@ -520,16 +491,6 @@ impl Player {
         }
     }
 
-    fn stop_live(&mut self) {
-        if let Some(enc) = self.live.take() {
-            match enc.finish() {
-                Ok(p) => self.shared.say(format!("Enregistré : {}", p.display())),
-                Err(e) => self.shared.say(format!("{e:#}")),
-            }
-        }
-        lock(&self.shared.status).live_rec = None;
-    }
-
     fn finish_auto(&mut self) {
         if let Some(a) = self.auto.take() {
             let n = a.frames.len();
@@ -587,16 +548,12 @@ mod tests {
         let st = wait(&shared, |s| s.file.is_some(), 10);
         assert!(st.file.is_some(), "open failed: {}", st.message);
 
-        // Live recording of one second, with a knob move in the middle.
-        let live = dir.join("live.mp4");
-        tx.send(Cmd::RecLive(Some(live.clone()))).unwrap();
-        std::thread::sleep(Duration::from_millis(500));
-        shared.params.lock().unwrap().feedback_gain = 0.8;
-        std::thread::sleep(Duration::from_millis(500));
-        tx.send(Cmd::RecLive(None)).unwrap();
+        // A first playback: opening the sound card can hold up the first frames.
+        tx.send(Cmd::Play).unwrap();
+        let st = wait(&shared, |s| s.time > 0.2, 10);
+        assert!(st.time > 0.2, "playback did not start: {}", st.message);
         tx.send(Cmd::Pause).unwrap();
-        let st = wait(&shared, |s| s.live_rec.is_none() && !s.playing, 10);
-        assert!(live.exists(), "no live file: {}", st.message);
+        wait(&shared, |s| !s.playing, 10);
 
         // Knob recording, then offline render of it.
         tx.send(Cmd::Seek(0.5)).unwrap();
@@ -624,7 +581,7 @@ mod tests {
         )
         .unwrap();
         let pr = crate::media::probe(&out).unwrap();
-        eprintln!("live {:?}, auto {} frames → {:.2}s, audio {}", live, auto.frames.len(), pr.duration, pr.has_audio);
+        eprintln!("auto {} frames → {:.2}s, audio {}", auto.frames.len(), pr.duration, pr.has_audio);
         assert!(pr.has_audio);
     }
 }

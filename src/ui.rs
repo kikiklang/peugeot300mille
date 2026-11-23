@@ -1,7 +1,8 @@
 //! Look and widgets of the control panel: theme, fonts, cards, knob rows, sound links.
 
 use crate::audio::{FIRST_TEMPO_SOURCE, MENU_SOURCES, SOURCES};
-use crate::params::{knob_index, Params, INPUT_KNOBS, KNOBS};
+use crate::knob::Knob;
+use crate::params::{KnobRow, Params};
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, TextStyle};
 use std::sync::Arc;
 
@@ -130,55 +131,38 @@ pub fn card(ui: &mut egui::Ui, title: &str, subtitle: &str, add: impl FnOnce(&mu
     ui.add_space(10.0);
 }
 
-fn range_of(name: &str) -> (f32, f32) {
-    if let Some(k) = KNOBS.iter().find(|k| k.0 == name) {
-        return (k.1, k.2);
-    }
-    if name.starts_with("ov") {
-        if name.ends_with("_x") || name.ends_with("_y") {
-            return (-1.0, 1.0);
-        }
-        if name.ends_with("_speed") {
-            return (-4.0, 4.0);
-        }
-    }
-    if let Some(k) = INPUT_KNOBS.iter().find(|k| k.0 == name) {
-        return (k.3, k.4);
-    }
-    (0.0, 1.0)
-}
-
-fn default_of(name: &str) -> f32 {
-    *Params::default().knob_mut(name)
+fn default_of(knob: Knob) -> f32 {
+    *knob.get_mut(&mut Params::default())
 }
 
 /// Aligned rows: label · slider · sound link. Double-click a slider to reset it.
-pub fn knob_grid(ui: &mut egui::Ui, id: impl std::hash::Hash, p: &mut Params, rows: &[(&str, &str, &str)], sound: bool) {
+pub fn knob_grid(ui: &mut egui::Ui, id: impl std::hash::Hash, p: &mut Params, rows: &[KnobRow], sound: bool) {
     egui::Grid::new(id).num_columns(3).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
-        for (name, label, help) in rows {
-            knob_row(ui, p, name, label, help, sound);
+        for &(knob, label, help) in rows {
+            knob_row(ui, p, knob, label, help, sound);
             ui.end_row();
         }
     });
 }
 
-pub fn knob_row(ui: &mut egui::Ui, p: &mut Params, name: &str, label: &str, help: &str, sound: bool) {
+pub fn knob_row(ui: &mut egui::Ui, p: &mut Params, knob: Knob, label: &str, help: &str, sound: bool) {
     ui.label(label).on_hover_text(help);
-    let (lo, hi) = range_of(name);
+    let (lo, hi) = knob.range();
     let decimals = if hi - lo > 10.0 { 0 } else { 2 };
     // Two-way knobs (centre = 0) are not filled from the left.
-    let r = ui.add(egui::Slider::new(p.knob_mut(name), lo..=hi).fixed_decimals(decimals).trailing_fill(lo >= 0.0)).on_hover_ui(|ui| {
+    let r = ui.add(egui::Slider::new(knob.get_mut(p), lo..=hi).fixed_decimals(decimals).trailing_fill(lo >= 0.0)).on_hover_ui(|ui| {
         // Built only while hovered: there are dozens of knobs on screen. Same layout as on_hover_text.
         ui.set_max_width(ui.spacing().tooltip_width);
-        ui.label(format!("{help}\nDouble-clic : remettre à {}", default_of(name)));
+        ui.label(format!("{help}\nDouble-clic : remettre à {}", default_of(knob)));
     });
     if r.double_clicked() {
-        *p.knob_mut(name) = default_of(name);
+        *knob.get_mut(p) = default_of(knob);
     }
-    if KNOBS.iter().any(|k| k.0 == name) && sound {
-        sound_link(ui, p, knob_index(name));
-    } else {
-        ui.label("");
+    match knob.driven_slot().filter(|_| sound) {
+        Some(slot) => sound_link(ui, p, slot),
+        None => {
+            ui.label("");
+        }
     }
 }
 
@@ -226,19 +210,12 @@ fn sound_link(ui: &mut egui::Ui, p: &mut Params, k: usize) {
 }
 
 /// Short name for a knob, for the summary of links.
-pub fn knob_label(name: &str) -> String {
+pub fn knob_label(knob: Knob) -> String {
     use crate::params::{AMP_KNOBS, CAM_GROUPS, CAM_KNOBS, VHS_KNOBS};
-    AMP_KNOBS
-        .iter()
-        .chain(VHS_KNOBS.iter())
-        .chain(CAM_KNOBS.iter())
-        .chain(CAM_GROUPS.iter().flat_map(|g| g.1.iter()))
-        .find(|k| k.0 == name)
-        .map_or_else(
-            || match name.strip_prefix("ov") {
-                Some(r) => format!("Calque {} · {}", r.get(..1).unwrap_or("?"), if r.ends_with("opacity") { "Opacité" } else { "Taille" }),
-                None => name.to_string(),
-            },
-            |k| k.1.to_string(),
-        )
+    let row = AMP_KNOBS.iter().chain(&VHS_KNOBS).chain(&CAM_KNOBS).chain(CAM_GROUPS.iter().flat_map(|g| g.1)).find(|r| r.0 == knob);
+    match (row, knob.name().strip_prefix("ov")) {
+        (Some(r), _) => r.1.to_string(),
+        (None, Some(rest)) => format!("Calque {} · {}", rest.get(..1).unwrap_or("?"), if rest.ends_with("opacity") { "Opacité" } else { "Taille" }),
+        (None, None) => knob.name().to_string(),
+    }
 }

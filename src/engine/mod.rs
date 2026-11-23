@@ -15,7 +15,8 @@ pub mod syncmix;
 pub mod tv;
 pub mod vhs;
 
-use crate::params::{Params, INPUT_KNOBS, KNOBS};
+use crate::knob::Knob;
+use crate::params::Params;
 use rayon::prelude::*;
 use signal::*;
 use std::sync::{mpsc::sync_channel, Arc};
@@ -209,15 +210,8 @@ pub fn sanitized(p: &Params) -> Params {
             *v = default;
         }
     };
-    for name in KNOBS.iter().map(|k| k.0).chain(INPUT_KNOBS.iter().map(|k| k.0)) {
-        fix(p.knob_mut(name), *d.knob_mut(name));
-    }
-    for (o, od) in p.overlays.iter_mut().zip(&d.overlays) {
-        fix(&mut o.opacity, od.opacity);
-        fix(&mut o.size, od.size);
-        fix(&mut o.x, od.x);
-        fix(&mut o.y, od.y);
-        fix(&mut o.speed, od.speed);
+    for knob in Knob::ALL {
+        fix(knob.get_mut(&mut p), *knob.get_mut(&mut d));
     }
     for (b, bd) in p.bands.iter_mut().zip(&d.bands) {
         fix(&mut b.lo, bd.lo);
@@ -227,8 +221,6 @@ pub fn sanitized(p: &Params) -> Params {
     for m in p.mods.iter_mut() {
         fix(&mut m.depth, 0.0);
     }
-    fix(&mut p.lut_in_amount, d.lut_in_amount);
-    fix(&mut p.lut_out_amount, d.lut_out_amount);
     fix(&mut p.sound_amount, d.sound_amount);
     fix(&mut p.tempo_phase, d.tempo_phase);
     p

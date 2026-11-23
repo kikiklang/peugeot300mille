@@ -51,8 +51,8 @@ pub fn image_tab(ui: &mut egui::Ui, c: &mut ImageTab) {
     let sound = st.has_sound;
     card(ui, "Entrée", "Avant le circuit : ce qui entre colore toute la boucle.", |ui| {
         egui::Grid::new("input").num_columns(3).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
-            for (name, label, help, _, _) in INPUT_KNOBS {
-                ui::knob_row(ui, p, name, label, help, false);
+            for (knob, label, help) in INPUT_KNOBS {
+                ui::knob_row(ui, p, knob, label, help, false);
                 ui.end_row();
             }
         });

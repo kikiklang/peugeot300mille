@@ -4,7 +4,7 @@ use super::job::RenderJob;
 use super::link::lock;
 use super::App;
 use crate::player::Cmd;
-use crate::ui::{ACCENT, REC, WEAK};
+use crate::ui::{ACCENT, WEAK};
 use eframe::egui::{self, RichText};
 
 const VIDEO_FILES: [&str; 8] = ["mp4", "mov", "mkv", "avi", "webm", "m4v", "mpg", "mts"];
@@ -41,7 +41,7 @@ impl App {
                     }
                     let dur = st.file.map_or(1.0, |f| f.timeline());
                     let mut t = self.seek.unwrap_or(st.time);
-                    ui.spacing_mut().slider_width = (ui.available_width() - 560.0).max(160.0);
+                    ui.spacing_mut().slider_width = (ui.available_width() - 440.0).max(160.0);
                     let resp = ui.add(egui::Slider::new(&mut t, 0.0..=dur).show_value(false));
                     if resp.dragged() || resp.changed() {
                         self.seek = Some(t);
@@ -52,17 +52,8 @@ impl App {
                     }
                     ui.label(RichText::new(format!("{} / {}", fmt_time(t), fmt_time(dur))).monospace());
                     ui.add_space(10.0);
-                    let live = st.live_rec;
-                    let live_txt = if live { RichText::new("⏹  Arrêter").color(REC) } else { RichText::new("⏺  En direct…") };
-                    if ui.add_enabled(!st.auto_rec, egui::Button::new(live_txt)).on_hover_text("Enregistre ce qui est joué dans un fichier vidéo, avec le son d'origine.").clicked() {
-                        if live {
-                            self.link.send(Cmd::RecLive(None));
-                        } else if let Some(p) = rfd::FileDialog::new().set_file_name("peugeot300mille-live.mp4").add_filter("MP4", &["mp4"]).save_file() {
-                            self.link.send(Cmd::RecLive(Some(p)));
-                        }
-                    }
                     let auto_txt = if st.auto_rec { RichText::new(format!("⏹  Stop ({} img)", st.auto_frames)).color(ACCENT) } else { RichText::new("⏺  Réglages") };
-                    if ui.add_enabled(!live, egui::Button::new(auto_txt)).on_hover_text("Joue la vidéo et retient chaque mouvement de bouton, pour un rendu propre ensuite.").clicked() {
+                    if ui.add(egui::Button::new(auto_txt)).on_hover_text("Joue la vidéo et retient chaque mouvement de bouton, pour un rendu propre ensuite.").clicked() {
                         self.link.send(Cmd::RecAuto(!st.auto_rec));
                     }
                     let can_render = st.has_automation && self.job.is_none();
@@ -97,9 +88,6 @@ impl App {
         let status = egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(14, 6));
         egui::TopBottomPanel::bottom("status").frame(status).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if st.live_rec {
-                    ui.label(RichText::new("● REC").color(REC).strong());
-                }
                 if st.auto_rec {
                     ui.label(RichText::new("● RÉGLAGES").color(ACCENT).strong());
                 }
