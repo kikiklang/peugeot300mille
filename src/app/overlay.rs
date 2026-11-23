@@ -2,7 +2,7 @@
 
 use super::link::{lock, Link};
 use crate::download::{Download, DownloadSlot};
-use crate::engine::overlay::{Clip, LOOP_BEATS, MAX_SECONDS, MODES, MODE_HELP, N_OVERLAYS, PLACES};
+use crate::engine::overlay::{loop_lengths, Clip, MAX_SECONDS, MODES, MODE_HELP, N_OVERLAYS, PLACES};
 use crate::engine::signal::TV_FPS;
 use crate::knob::Knob;
 use crate::params::{KnobRow, Params};
@@ -241,7 +241,7 @@ impl OverlayPanel<'_> {
     }
 
     fn selectors(&mut self, ui: &mut egui::Ui) {
-        let (slot, bpm) = (self.slot, self.bpm);
+        let (slot, bpm, meter) = (self.slot, self.bpm, self.p.tempo_meter);
         let o = &mut self.p.overlays[slot];
         egui::Grid::new(("ovsel", slot)).num_columns(2).spacing([12.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
             ui.label("Placement");
@@ -267,12 +267,12 @@ impl OverlayPanel<'_> {
             ui.end_row();
             ui.label("Longueur");
             ui.add_enabled_ui(bpm.is_some(), |ui| {
-                egui::ComboBox::from_id_salt(("ovbeats", slot)).selected_text(beats_label(o.beats)).show_ui(ui, |ui| {
-                    for n in LOOP_BEATS {
+                egui::ComboBox::from_id_salt(("ovbeats", slot)).selected_text(beats_label(o.beats, meter)).show_ui(ui, |ui| {
+                    for n in loop_lengths(meter) {
                         // A loop holds at most MAX_SECONDS.
                         let fits = n == 0 || bpm.is_some_and(|b| n as f64 * 60.0 / b as f64 <= MAX_SECONDS);
                         ui.add_enabled_ui(fits, |ui| {
-                            ui.selectable_value(&mut o.beats, n, beats_label(n));
+                            ui.selectable_value(&mut o.beats, n, beats_label(n, meter));
                         });
                     }
                 })
@@ -285,10 +285,11 @@ impl OverlayPanel<'_> {
     }
 }
 
-fn beats_label(n: u8) -> String {
+fn beats_label(n: u8, meter: u8) -> String {
     match n {
         0 => "Libre".to_string(),
-        1 => "1 temps".to_string(),
+        n if n % meter == 0 && n / meter == 1 => format!("{n} temps (1 mesure)"),
+        n if n % meter == 0 => format!("{n} temps ({} mesures)", n / meter),
         n => format!("{n} temps"),
     }
 }

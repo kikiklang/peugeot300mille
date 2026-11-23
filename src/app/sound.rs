@@ -4,7 +4,7 @@ use super::transport::fmt_time;
 use super::view::View;
 use crate::audio::{bin_freq, freq_bin, N_BANDS, N_GLOBAL, SOURCES, SPEC_BINS};
 use crate::knob::DRIVEN;
-use crate::params::{Band, Params, BAND_HINTS, SOUND_PRESETS};
+use crate::params::{Band, Params, BAND_HINTS, MAX_BPM, METERS, MIN_BPM, SOUND_PRESETS};
 use crate::ui::{self, card, ACCENT, WEAK};
 use eframe::egui::{self, RichText};
 
@@ -49,23 +49,44 @@ pub fn sound_tab(ui: &mut egui::Ui, p: &mut Params, st: &View, bands: &mut BandP
         });
     });
     card(ui, "Tempo", "Branche un bouton sur « Tempo » ou « Vague » avec 🎵 pour le caler sur les temps du morceau.", |ui| {
-        let Some(bpm) = st.bpm else {
-            ui.label(RichText::new("Aucun tempo détecté dans ce son.").color(WEAK));
-            return;
-        };
+        let manual = p.tempo_manual_bpm > 0.0;
         egui::Grid::new("tempo").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Tempo");
             ui.horizontal(|ui| {
-                let shown = bpm * 2f32.powi(p.tempo_octave as i32);
-                ui.label(RichText::new(format!("{shown:.1} BPM")).strong().color(ACCENT));
-                if ui.add_enabled(p.tempo_octave > -2, egui::Button::new("÷2")).on_hover_text("Le détecteur a compté deux fois trop de temps.").clicked() {
+                // Shown as heard, ÷2 / ×2 included: what is typed is the tempo, full stop.
+                let mut shown = p.tempo_bpm(st.bpm).unwrap_or(120.0);
+                let field = egui::DragValue::new(&mut shown).range(MIN_BPM..=MAX_BPM).speed(0.05).fixed_decimals(2).suffix(" BPM");
+                if ui.add(field).changed() {
+                    p.tempo_manual_bpm = shown;
+                    p.tempo_octave = 0;
+                }
+                if ui.add_enabled(p.tempo_octave > -2, egui::Button::new("÷2")).clicked() {
                     p.tempo_octave -= 1;
                 }
-                if ui.add_enabled(p.tempo_octave < 2, egui::Button::new("×2")).on_hover_text("Le détecteur a compté deux fois trop peu de temps.").clicked() {
+                if ui.add_enabled(p.tempo_octave < 2, egui::Button::new("×2")).clicked() {
                     p.tempo_octave += 1;
+                }
+                if manual {
+                    if ui.small_button("Auto").clicked() {
+                        p.tempo_manual_bpm = 0.0;
+                        p.tempo_octave = 0;
+                    }
+                } else {
+                    ui.label(RichText::new(if st.bpm.is_some() { "détecté" } else { "non détecté" }).small().color(WEAK));
                 }
             });
             ui.end_row();
+            ui.label("Mesure");
+            ui.horizontal(|ui| {
+                for m in METERS {
+                    ui.selectable_value(&mut p.tempo_meter, m, format!("{m}"));
+                }
+                ui.label(RichText::new("temps").small().color(WEAK));
+            });
+            ui.end_row();
+            if p.tempo_bpm(st.bpm).is_none() {
+                return;
+            }
             ui.label("Calage");
             ui.horizontal(|ui| {
                 // No tooltip: it could open over the button and take the click aimed at the beat.
@@ -83,7 +104,7 @@ pub fn sound_tab(ui: &mut egui::Ui, p: &mut Params, st: &View, bands: &mut BandP
             ui.end_row();
             ui.label("Décalage");
             ui.add(egui::Slider::new(&mut p.tempo_phase, -2.0..=2.0).step_by(0.01).fixed_decimals(2).suffix(" temps"))
-                .on_hover_text("Avance ou recule la grille. ±1 change le temps sur lequel tombent les pulsations de 2 et 4 temps.");
+                .on_hover_text("Avance ou recule la grille. ±1 change le temps sur lequel tombe le début de la mesure.");
             ui.end_row();
             for (label, i) in [("Chaque temps", 11usize), ("Chaque mesure", 13)] {
                 ui.label(label);

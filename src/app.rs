@@ -143,7 +143,7 @@ impl App {
             let old = *lock(&link.shared.params);
             let mut p = old;
             for (slot, state) in slots.iter_mut().enumerate() {
-                let bpm = st.bpm.map(|b| b * 2f32.powi(p.tempo_octave as i32));
+                let bpm = p.tempo_bpm(st.bpm);
                 OverlayPanel { slot, p: &mut p, info: st.overlays[slot].as_ref(), state, link, sound: st.has_sound, bpm }.poll(ctx);
             }
             ui.horizontal(|ui| {

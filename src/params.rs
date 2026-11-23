@@ -154,6 +154,10 @@ pub struct Params {
     pub tempo_phase: f32,
     /// Where "Align start" was clicked, in seconds on the timeline (negative = never).
     pub tempo_restart: f32,
+    /// Tempo typed by hand, which replaces the detected one (0 = use the detection).
+    pub tempo_manual_bpm: f32,
+    /// Beats in a bar.
+    pub tempo_meter: u8,
 }
 
 impl Default for Params {
@@ -202,6 +206,8 @@ impl Default for Params {
             tempo_octave: 0,
             tempo_phase: 0.0,
             tempo_restart: -1.0,
+            tempo_manual_bpm: 0.0,
+            tempo_meter: 4,
         }
     }
 }
@@ -355,7 +361,18 @@ pub const CAM_KNOBS: [KnobRow; 4] = [
     (Knob::Noise, "Noise", "The camera's gain turned up by hand, and the grain that comes with it."),
 ];
 
+/// Bar lengths on offer, in beats.
+pub const METERS: [u8; 5] = [3, 4, 5, 6, 7];
+pub const MIN_BPM: f32 = 20.0;
+pub const MAX_BPM: f32 = 400.0;
+
 impl Params {
+    /// The tempo in use: typed by hand or else detected, with ÷2 / ×2 applied.
+    pub fn tempo_bpm(&self, detected: Option<f32>) -> Option<f32> {
+        let base = if self.tempo_manual_bpm > 0.0 { Some(self.tempo_manual_bpm) } else { detected };
+        base.map(|b| b * 2f32.powi(self.tempo_octave as i32))
+    }
+
     /// Applies a sound-reaction preset (keeps the knobs' own values).
     pub fn set_sound_preset(&mut self, i: usize) {
         self.mods = [Mod::default(); N_DRIVEN];
@@ -390,7 +407,7 @@ impl Params {
         for o in self.overlays.iter_mut() {
             o.mode = o.mode.min(crate::engine::overlay::MODES.len() as u8 - 1);
             o.place = o.place.min(1);
-            if !crate::engine::overlay::LOOP_BEATS.contains(&o.beats) {
+            if o.beats > crate::engine::overlay::MAX_LOOP_BEATS {
                 o.beats = 0;
             }
         }
@@ -405,6 +422,10 @@ impl Params {
         self.tempo_octave = self.tempo_octave.clamp(-2, 2);
         self.tempo_phase = self.tempo_phase.clamp(-2.0, 2.0);
         self.tempo_restart = if self.tempo_restart >= 0.0 { self.tempo_restart.min(86_400.0) } else { -1.0 };
+        self.tempo_manual_bpm = if self.tempo_manual_bpm > 0.0 { self.tempo_manual_bpm.clamp(MIN_BPM, MAX_BPM) } else { 0.0 };
+        if !METERS.contains(&self.tempo_meter) {
+            self.tempo_meter = 4;
+        }
         for m in self.mods.iter_mut() {
             m.source = m.source.min(crate::audio::N_FEAT as u8);
             m.depth = m.depth.clamp(-1.0, 1.0);
@@ -482,6 +503,16 @@ mod tests {
         let p: Params = serde_json::from_str(r#"{"overlays":[{"opacity":0.1},{"opacity":0.2},{"opacity":0.3}]}"#).unwrap();
         assert_eq!((p.overlays[0].opacity, p.overlays[2].opacity), (0.1, 0.3));
         assert_eq!(p.overlays[3], Overlay::default());
+    }
+
+    #[test]
+    fn tempo_settings_are_kept_in_range() {
+        let c = Params { tempo_manual_bpm: 9000.0, tempo_meter: 9, ..Params::default() }.clamped();
+        assert_eq!((c.tempo_manual_bpm, c.tempo_meter), (MAX_BPM, 4));
+        let c = Params { tempo_manual_bpm: f32::NAN, tempo_meter: 3, ..Params::default() }.clamped();
+        assert_eq!((c.tempo_manual_bpm, c.tempo_meter), (0.0, 3));
+        assert_eq!(Params { tempo_manual_bpm: 150.0, tempo_octave: -1, ..Params::default() }.tempo_bpm(Some(90.0)), Some(75.0));
+        assert_eq!(Params::default().tempo_bpm(Some(90.0)), Some(90.0));
     }
 
     #[test]

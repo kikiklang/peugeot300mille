@@ -60,7 +60,11 @@ pub const MODE_HELP: [&str; 18] = [
 ];
 
 /// Loop lengths offered, in beats (0 = free).
-pub const LOOP_BEATS: [u8; 6] = [0, 1, 2, 4, 8, 16];
+pub fn loop_lengths(meter: u8) -> [u8; 6] {
+    [0, 1, 2, meter, 2 * meter, 4 * meter]
+}
+/// Longest loop in beats: four bars of the longest meter.
+pub const MAX_LOOP_BEATS: u8 = 28;
 
 /// A short clip, decoded once at the TV's frame rate, RGBA.
 pub struct Clip {

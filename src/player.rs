@@ -189,8 +189,13 @@ impl Player {
                 self.halt();
                 match probe(&path) {
                     Ok(pr) => {
-                        // An alignment belongs to the track it was clicked on.
-                        lock(&self.shared.params).tempo_restart = -1.0;
+                        // An alignment, a typed tempo and a meter belong to their track.
+                        {
+                            let mut p = lock(&self.shared.params);
+                            p.tempo_restart = -1.0;
+                            p.tempo_manual_bpm = 0.0;
+                            p.tempo_meter = 4;
+                        }
                         // Every holder lets go first: two long tracks must not sit in memory
                         // together while the new one is decoded.
                         self.sound = None;

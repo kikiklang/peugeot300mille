@@ -66,7 +66,7 @@ pub fn image_tab(ui: &mut egui::Ui, c: &mut ImageTab) {
         let in_use = st.overlays.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
         let count = (**shown).max(in_use).clamp(1, N_OVERLAYS);
         for (slot, state) in slots.iter_mut().enumerate().take(count) {
-            let bpm = st.bpm.map(|b| b * 2f32.powi(p.tempo_octave as i32));
+            let bpm = p.tempo_bpm(st.bpm);
             OverlayPanel { slot, p, info: st.overlays[slot].as_ref(), state, link, sound, bpm }.show(ui);
         }
         ui.horizontal(|ui| {

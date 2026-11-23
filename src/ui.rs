@@ -174,9 +174,9 @@ fn short(source: u8) -> String {
         10 => "T½".into(),
         11 => "T1".into(),
         12 => "T2".into(),
-        13 => "T4".into(),
+        13 => "TM".into(),
         14 => "~1".into(),
-        15 => "~4".into(),
+        15 => "~M".into(),
         s => SOURCES.get(s as usize).map_or_else(String::new, |n| n.chars().take(3).collect()),
     }
 }

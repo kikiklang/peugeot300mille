@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 /// Sources that can drive a knob.
 pub const SOURCES: [&str; 16] = [
     "—", "Volume", "Basses", "Médiums", "Aigus", "Attaques", "Bande 1", "Bande 2", "Bande 3", "Bande 4",
-    "Tempo · ½ temps", "Tempo · 1 temps", "Tempo · 2 temps", "Tempo · 4 temps", "Vague · 1 temps", "Vague · 4 temps",
+    "Tempo · ½ temps", "Tempo · 1 temps", "Tempo · 2 temps", "Tempo · mesure", "Vague · 1 temps", "Vague · mesure",
 ];
 /// Sources offered in the menus: none, Volume, Attacks, Bands 1–4, Tempo. (Bass, mid and treble
 /// are still measured so that older saved settings keep working, but are no longer offered.)
@@ -744,15 +744,16 @@ impl BeatGrid {
     /// Pulses on ½, 1, 2 and 4 beats, then slow waves over 1 and 4 beats, each 0..1.
     #[cfg(test)]
     fn measures(&self, tv_k: i64, octave: i8, phase: f32) -> [f32; N_TEMPO] {
-        self.position(tv_k, octave, phase, -1.0).map_or([0.0; N_TEMPO], beat_shapes)
+        self.position(tv_k, octave, phase, -1.0).map_or([0.0; N_TEMPO], |x| beat_shapes(x, 4))
     }
 }
 
 /// What each tempo source is worth at a position in beats.
-fn beat_shapes(pos: f64) -> [f32; N_TEMPO] {
+fn beat_shapes(pos: f64, meter: u8) -> [f32; N_TEMPO] {
+    let bar = meter as f64;
     let pulse = |div: f64| (-5.0 * pos.rem_euclid(div) / div.min(1.0)).exp() as f32;
     let wave = |div: f64| (0.5 + 0.5 * (std::f64::consts::TAU * pos / div).cos()) as f32;
-    [pulse(0.5), pulse(1.0), pulse(2.0), pulse(4.0), wave(1.0), wave(4.0)]
+    [pulse(0.5), pulse(1.0), pulse(2.0), pulse(bar), wave(1.0), wave(bar)]
 }
 
 /// The soundtrack and its analysis, loaded once per file.
@@ -799,6 +800,16 @@ impl Sound {
 
     /// Where the music is at a TV frame, in beats. None if the track has no tempo.
     pub fn beat_position(&self, tv_k: i64, p: &crate::params::Params) -> Option<f64> {
+        if p.tempo_manual_bpm > 0.0 {
+            // A tempo typed by hand is a straight grid from "Align start", whatever was detected.
+            let origin = match (p.tempo_restart >= 0.0, &self.tempo) {
+                (true, Some(g)) => g.snap_to_hit(p.tempo_restart as f64),
+                (true, None) => p.tempo_restart as f64,
+                (false, _) => 0.0,
+            };
+            let beats = (tv_k as f64 / TV_FPS - origin) * p.tempo_manual_bpm.min(crate::params::MAX_BPM) as f64 / 60.0;
+            return Some((beats + p.tempo_phase as f64) * 2f64.powi(p.tempo_octave as i32));
+        }
         self.tempo.as_ref()?.position(tv_k, p.tempo_octave, p.tempo_phase, p.tempo_restart)
     }
 
@@ -807,7 +818,7 @@ impl Sound {
         let mut out = [0.0; N_FEAT];
         out[..N_GLOBAL].copy_from_slice(&self.features.at(tv_k));
         if let Some(x) = self.beat_position(tv_k, p) {
-            out[N_GLOBAL + N_BANDS..].copy_from_slice(&beat_shapes(x));
+            out[N_GLOBAL + N_BANDS..].copy_from_slice(&beat_shapes(x, p.tempo_meter));
         }
         if tv_k >= 0 {
             for (i, b) in p.bands.iter().enumerate() {
@@ -1812,6 +1823,20 @@ mod tests {
         }
         let g = BeatGrid::analyse(&Track { pcm: mono.iter().flat_map(|&x| [x, x]).collect(), truncated: false }).expect("a beat");
         assert!((g.bpm - 77.0).abs() < 0.02, "read as {:.3} BPM", g.bpm);
+    }
+
+    #[test]
+    fn a_typed_tempo_and_meter_replace_the_detection() {
+        let mut snd = tone();
+        Arc::get_mut(&mut snd).unwrap().tempo = Some(BeatGrid { bpm: 117.0, pos: vec![0.0; 10], onsets: Vec::new() });
+        let p = Params { tempo_manual_bpm: 120.0, tempo_meter: 3, tempo_restart: 10.0, ..Params::default() };
+        let frame = |t: f64| (t * TV_FPS).ceil() as i64;
+        let bar = N_GLOBAL + N_BANDS + 3;
+        // At 120 BPM a bar of 3 lasts 1.5 s, counted from the alignment.
+        assert!(snd.at(frame(10.0), &p)[bar] > 0.7);
+        assert!(snd.at(frame(10.5), &p)[bar] < 0.05, "beat 2 is not a bar");
+        assert!(snd.at(frame(11.5), &p)[bar] > 0.7);
+        assert!((snd.beat_position(frame(13.0), &p).unwrap() - 6.0).abs() < 0.08);
     }
 
     #[test]
