@@ -5,7 +5,7 @@ use crate::audio::{Output, Sound, N_FEAT};
 use crate::engine::{lut::Lut, overlay::{Clip, N_OVERLAYS}, Engine};
 use crate::media::{lock, probe, Probe};
 use crate::params::Params;
-use crate::runner::{Automation, Runner};
+use crate::runner::{Automation, LutChange, OverlayChange, Runner};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -62,11 +62,25 @@ pub struct Shared {
     pub status: Mutex<Status>,
     /// Latest screen (RGB8 768 × 480) and a counter that changes with each new one.
     pub screen: Mutex<(u64, Vec<u8>)>,
+    /// A fingerprint of each picture played during a take, to compare it with its render.
+    #[cfg(test)]
+    pub take_prints: Mutex<Vec<u64>>,
+    /// Tests must stay silent.
+    #[cfg(test)]
+    pub no_sound_card: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
     pub fn new() -> Self {
-        Self { params: Mutex::new(Params::default()), status: Mutex::new(Status::default()), screen: Mutex::new((0, Vec::new())) }
+        Self {
+            params: Mutex::new(Params::default()),
+            status: Mutex::new(Status::default()),
+            screen: Mutex::new((0, Vec::new())),
+            #[cfg(test)]
+            take_prints: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            no_sound_card: std::sync::atomic::AtomicBool::new(false),
+        }
     }
     fn say(&self, m: impl Into<String>) {
         lock(&self.status).message = m.into();
@@ -118,6 +132,7 @@ pub fn spawn(shared: Arc<Shared>, rx: Receiver<Cmd>, repaint: impl Fn() + Send +
                 clips: Default::default(),
                 playing: false,
                 auto: None,
+                take_first: None,
                 shown: Params::default(),
                 dirty_since: None,
                 play_t0: None,
@@ -142,6 +157,8 @@ struct Player {
     clips: [Option<Arc<Clip>>; N_OVERLAYS],
     playing: bool,
     auto: Option<Automation>,
+    /// The knobs the current take was warmed up on, for its first picture.
+    take_first: Option<Params>,
     shown: Params,
     dirty_since: Option<Instant>,
     play_t0: Option<(Instant, i64)>,
@@ -259,10 +276,29 @@ impl Player {
                 }
             }
             Cmd::RecAuto(true) => {
+                let Some(old) = self.run.take() else { return };
+                // A take starts exactly as its render will: from a clean box, warmed up on the
+                // same knobs. Otherwise the feedback's history makes the two pictures differ.
+                let (pr, start) = (old.probe.clone(), old.out_j as f64 / old.probe.fps());
+                let p = self.params();
+                let mut engine = Engine::new();
+                (engine.lut_in, engine.lut_out) = self.luts.clone();
+                engine.overlays = self.clips.clone();
+                match Runner::start(pr, Some(engine), self.sound.clone(), start, &|_| p) {
+                    Ok(r) => self.run = Some(r),
+                    Err(e) => {
+                        self.run = Some(old);
+                        self.shared.say(format!("{e:#}"));
+                        return;
+                    }
+                }
+                self.take_first = Some(p);
                 let Some(run) = self.run.as_ref() else { return };
+                #[cfg(test)]
+                lock(&self.shared.take_prints).clear();
                 self.auto = Some(Automation {
                     source: run.probe.path.display().to_string(),
-                    start: run.out_j as f64 / run.probe.fps(),
+                    start,
                     fps_num: run.probe.fps_num,
                     fps_den: run.probe.fps_den,
                     frames: Vec::new(),
@@ -270,6 +306,8 @@ impl Player {
                     lut_out: self.luts.1.as_ref().map(|l| l.path.display().to_string()),
                     overlays: self.clips.clone().map(|c| c.map(|c| c.path.display().to_string())),
                     overlay_ranges: self.clips.clone().map(|c| c.map(|c| (c.start, c.end))),
+                    overlay_changes: Vec::new(),
+                    lut_changes: Vec::new(),
                 });
                 let mut st = lock(&self.shared.status);
                 st.auto_rec = true;
@@ -290,11 +328,15 @@ impl Player {
                     end: c.end,
                     duration: c.duration,
                 });
-                self.clips[slot] = clip;
                 if let Some(a) = self.auto.as_mut() {
-                    a.overlays = self.clips.clone().map(|c| c.map(|c| c.path.display().to_string()));
-                    a.overlay_ranges = self.clips.clone().map(|c| c.map(|c| (c.start, c.end)));
+                    a.overlay_changes.push(OverlayChange {
+                        frame: a.frames.len(),
+                        slot,
+                        file: clip.as_ref().map(|c| c.path.display().to_string()),
+                        range: clip.as_ref().map(|c| (c.start, c.end)),
+                    });
                 }
+                self.clips[slot] = clip;
                 if let Some(r) = self.run.as_mut() {
                     r.engine.overlays = self.clips.clone();
                 }
@@ -315,15 +357,17 @@ impl Player {
                         st.lut_in = name;
                     }
                 }
+                if let Some(a) = self.auto.as_mut() {
+                    a.lut_changes.push(LutChange { frame: a.frames.len(), output, file: lut.as_ref().map(|l| l.path.display().to_string()) });
+                }
                 if output {
                     self.luts.1 = lut;
                 } else {
                     self.luts.0 = lut;
                 }
-                if let Some(a) = self.auto.as_mut() {
-                    let path = |l: &Option<Arc<Lut>>| l.as_ref().map(|l| l.path.display().to_string());
-                    a.lut_in = path(&self.luts.0);
-                    a.lut_out = path(&self.luts.1);
+                // While playing too: a new LUT must show (and record) right away.
+                if let Some(r) = self.run.as_mut() {
+                    (r.engine.lut_in, r.engine.lut_out) = self.luts.clone();
                 }
                 if !self.playing {
                     if let Some(r) = self.run.as_ref() {
@@ -370,6 +414,10 @@ impl Player {
     /// A sound card that went away (unplugged, sound server restarted) is opened again, not too
     /// often since it holds up the picture for a moment.
     fn check_output(&mut self) {
+        #[cfg(test)]
+        if self.shared.no_sound_card.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let lost = self.out.as_ref().is_some_and(Output::lost);
         if lost && self.out_opened.is_none_or(|t| t.elapsed() >= REOPEN_EVERY) {
             self.out = None;
@@ -407,7 +455,8 @@ impl Player {
     }
 
     fn play_one(&mut self) {
-        let p = self.params();
+        // The first picture of a take uses the very knobs its warm-up ran on.
+        let p = self.take_first.take().unwrap_or_else(|| self.params());
         if self.run.is_none() {
             self.halt();
             return;
@@ -439,6 +488,13 @@ impl Player {
         }
         if let Some(a) = self.auto.as_mut() {
             a.frames.push(p);
+            #[cfg(test)]
+            {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                run.screen.hash(&mut h);
+                lock(&self.shared.take_prints).push(h.finish());
+            }
         }
         self.shown = p;
         let run = self.run.as_ref().unwrap();
@@ -539,6 +595,184 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// A loop swapped during a take must only change from that moment in the render.
+    #[test]
+    fn a_take_keeps_what_happened_to_its_layers() {
+        let dir = std::env::temp_dir().join(format!("take-layers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = |name: &str, colour: &str, size: &str| {
+            let f = dir.join(name);
+            let src = format!("color={colour}:s={size}:r=30:d=8");
+            let ok = std::process::Command::new("ffmpeg").args(["-nostdin", "-y", "-loglevel", "error", "-f", "lavfi", "-i", &src, "-pix_fmt", "yuv420p"]).arg(&f).status().unwrap().success();
+            assert!(ok);
+            f
+        };
+        let (bg, red, blue) = (clip("bg.mp4", "black", "768x480"), clip("red.mp4", "red", "64x48"), clip("blue.mp4", "blue", "64x48"));
+        let load = |f: &std::path::Path, range: Option<(f64, f64)>| Some(Arc::new(Clip::load_range(f, range.map_or(0.0, |r| r.0), range.map(|r| r.1)).unwrap()));
+        let shared = Arc::new(Shared::new());
+        let (tx, rx) = channel();
+        spawn(shared.clone(), rx, || {});
+        tx.send(Cmd::Open(bg)).unwrap();
+        assert!(wait(&shared, |s| s.file.is_some(), 10).file.is_some());
+        {
+            let mut p = shared.params.lock().unwrap();
+            p.overlays[0].place = 1;
+            p.overlays[0].size = 1.0;
+        }
+        tx.send(Cmd::SetOverlay { slot: 0, clip: load(&red, Some((0.0, 1.0))) }).unwrap();
+        assert!(wait(&shared, |s| s.overlays[0].is_some(), 10).overlays[0].is_some());
+        tx.send(Cmd::RecAuto(true)).unwrap();
+        wait(&shared, |s| s.auto_frames >= 10, 10);
+        tx.send(Cmd::SetOverlay { slot: 0, clip: load(&blue, Some((0.0, 1.0))) }).unwrap();
+        wait(&shared, |s| s.auto_frames >= 25, 10);
+        tx.send(Cmd::RecAuto(false)).unwrap();
+        let auto = wait(&shared, |s| s.automation.is_some(), 10).automation.expect("a take");
+        let out = dir.join("take.mp4");
+        let mut clips: [Option<Arc<Clip>>; N_OVERLAYS] = Default::default();
+        clips[0] = load(std::path::Path::new(auto.overlays[0].as_ref().unwrap()), auto.overlay_ranges[0]);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        crate::render::render(std::path::Path::new(&auto.source), &out, crate::render::Knobs::Recorded(&auto), auto.start, None, (None, None), clips, &cancel, &mut |_, _| {}).unwrap();
+        let raw = std::process::Command::new("ffmpeg").args(["-nostdin", "-loglevel", "error", "-i"]).arg(&out).args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap().stdout;
+        let size = crate::media::FRAME_BYTES;
+        let centre = (240 * 768 + 384) * 3;
+        let colour = |n: usize| (raw[n * size + centre], raw[n * size + centre + 2]);
+        let frames = raw.len() / size;
+        let (first, last) = (colour(1), colour(frames - 2));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(first.0 > first.1 + 60, "the take starts on the red loop, the render shows {first:?}");
+        assert!(last.1 > last.0 + 60, "the take ends on the blue loop, the render shows {last:?}");
+    }
+
+    /// Every setting of the interface, moved during one take: the render must give the very same
+    /// pictures as what was played, bit for bit.
+    #[test]
+    fn a_render_is_the_take_for_every_setting() {
+        use crate::knob::Knob;
+        use std::hash::{Hash, Hasher};
+        let dir = std::env::temp_dir().join(format!("take-all-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| assert!(std::process::Command::new("ffmpeg").args(["-nostdin", "-y", "-loglevel", "error"]).args(args).status().unwrap().success());
+        let (src, a, b, cube) = (dir.join("src.mkv"), dir.join("a.mp4"), dir.join("b.mp4"), dir.join("warm.cube"));
+        run(&["-f", "lavfi", "-i", "testsrc2=s=768x480:r=30000/1001:d=70", "-f", "lavfi", "-i", "aevalsrc='0.7*sin(2*PI*65*mod(t,0.5))*exp(-25*mod(t,0.5))+0.05*sin(2*PI*880*t)':d=70:s=48000", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "flac", src.to_str().unwrap()]);
+        run(&["-f", "lavfi", "-i", "testsrc=s=96x72:r=30:d=4", "-pix_fmt", "yuv420p", a.to_str().unwrap()]);
+        run(&["-f", "lavfi", "-i", "testsrc2=s=96x54:r=30:d=4", "-pix_fmt", "yuv420p", b.to_str().unwrap()]);
+        std::fs::write(&cube, "LUT_3D_SIZE 2\n0 0 0\n1 0.1 0\n0 0.9 0.1\n1 1 0\n0 0 0.8\n1 0 1\n0 1 1\n1 1 0.9\n").unwrap();
+        let clip = |f: &std::path::Path, r: (f64, f64)| Some(Arc::new(Clip::load_range(f, r.0, Some(r.1)).unwrap()));
+        let lut = || Some(Arc::new(Lut::load(&cube).unwrap()));
+        let shared = Arc::new(Shared::new());
+        shared.no_sound_card.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = channel();
+        spawn(shared.clone(), rx, || {});
+        tx.send(Cmd::Open(src.clone())).unwrap();
+        let st = wait(&shared, |s| s.file.is_some() && s.message.starts_with("Ouvert"), 60);
+        assert!(st.has_sound && st.bpm.is_some(), "{}", st.message);
+        for slot in 0..N_OVERLAYS {
+            tx.send(Cmd::SetOverlay { slot, clip: clip(if slot % 2 == 0 { &a } else { &b }, (0.0, 1.5)) }).unwrap();
+        }
+        wait(&shared, |s| s.overlays.iter().all(Option::is_some), 20);
+        let base = {
+            let mut p = shared.params.lock().unwrap();
+            p.mix = 0.3;
+            p.feedback_gain = 0.3;
+            for (i, o) in p.overlays.iter_mut().enumerate() {
+                (o.opacity, o.size, o.x, o.place) = (0.5, 0.35, -0.8 + i as f32 * 0.22, (i % 2) as u8);
+            }
+            *p
+        };
+        tx.send(Cmd::RecAuto(true)).unwrap();
+        wait(&shared, |s| s.auto_rec, 20);
+        let mut steps: Vec<(usize, String)> = Vec::new();
+        let hold = |n: usize| wait(&shared, |s| s.auto_frames >= n, 30).auto_frames;
+        let mut at = hold(2);
+        // One setting at a time, held two pictures, then back.
+        let mut set = |name: String, change: &dyn Fn(&mut Params)| {
+            steps.push((at, name));
+            {
+                let mut p = shared.params.lock().unwrap();
+                *p = base;
+                change(&mut p);
+            }
+            at = hold(at + 2);
+        };
+        for &k in Knob::ALL {
+            let (lo, hi) = k.range();
+            set(k.name().into(), &|p| *k.get_mut(p) = lo + (hi - lo) * 0.7);
+        }
+        for i in 0..crate::params::CAMERAS.len() as u8 {
+            set(format!("camera {i}"), &|p| p.camera = i);
+        }
+        for i in 0..crate::params::MIRRORS.len() as u8 {
+            set(format!("mirror {i}"), &|p| p.mirror = i);
+        }
+        for m in 0..crate::engine::overlay::MODES.len() as u8 {
+            set(format!("blend mode {m}"), &|p| p.overlays[0].mode = m);
+        }
+        for source in 1..=crate::audio::N_FEAT as u8 {
+            set(format!("sound source {source}"), &|p| p.mods[Knob::FeedbackGain.driven_slot().unwrap()] = crate::params::Mod { source, depth: 0.6 });
+        }
+        for beats in crate::engine::overlay::loop_lengths(3) {
+            set(format!("loop {beats} beats"), &|p| { p.overlays[1].beats = beats; p.tempo_meter = 3; });
+        }
+        set("flip h".into(), &|p| p.overlays[2].flip_h = true);
+        set("flip v".into(), &|p| p.overlays[2].flip_v = true);
+        set("place".into(), &|p| p.overlays[0].place = 1);
+        set("sound amount".into(), &|p| { p.sound_amount = 1.7; p.mods[Knob::Mix.driven_slot().unwrap()] = crate::params::Mod { source: 6, depth: 0.5 }; });
+        set("band".into(), &|p| { p.bands[0] = crate::params::Band { lo: 80.0, hi: 900.0, mode: 0, sens: 6.0 }; p.mods[Knob::Blur.driven_slot().unwrap()] = crate::params::Mod { source: 6, depth: 0.5 }; });
+        for (name, change) in [
+            ("tempo ×2", (|p| p.tempo_octave = 1) as fn(&mut Params)),
+            ("tempo phase", |p| p.tempo_phase = 0.4),
+            ("align start", |p| p.tempo_restart = 3.2),
+            ("typed tempo", |p| p.tempo_manual_bpm = 156.8),
+            ("meter", |p| p.tempo_meter = 5),
+        ] {
+            set(name.into(), &|p| { change(p); p.mods[Knob::Color.driven_slot().unwrap()] = crate::params::Mod { source: 13, depth: 0.7 }; p.overlays[3].beats = 2; });
+        }
+        // Files changed during the take.
+        let mut media = |name: &str, c: Cmd| {
+            steps.push((at, name.to_string()));
+            tx.send(c).unwrap();
+            at = hold(at + 3);
+        };
+        media("input LUT on", Cmd::SetLut { output: false, lut: lut() });
+        media("output LUT on", Cmd::SetLut { output: true, lut: lut() });
+        media("input LUT off", Cmd::SetLut { output: false, lut: None });
+        media("output LUT off", Cmd::SetLut { output: true, lut: None });
+        media("loop swapped", Cmd::SetOverlay { slot: 0, clip: clip(&b, (0.2, 1.0)) });
+        media("loop range", Cmd::SetOverlay { slot: 1, clip: clip(&b, (1.0, 2.2)) });
+        media("loop removed", Cmd::SetOverlay { slot: 2, clip: None });
+        media("loop back", Cmd::SetOverlay { slot: 2, clip: clip(&a, (0.5, 2.0)) });
+        tx.send(Cmd::RecAuto(false)).unwrap();
+        let st = wait(&shared, |s| s.automation.is_some(), 20);
+        tx.send(Cmd::Pause).unwrap();
+        wait(&shared, |s| !s.playing, 20);
+        let auto = st.automation.expect("a take");
+        // The saved file must hold the same take.
+        let saved: Automation = serde_json::from_str(&serde_json::to_string(&auto).unwrap()).unwrap();
+        assert!(saved.frames == auto.frames, "the saved take differs");
+        let (luts, clips, problems) = crate::render::take_media(&saved);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut rendered = Vec::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let during = crate::render::render_frames(std::path::Path::new(&saved.source), crate::render::Knobs::Recorded(&saved), saved.start, None, luts, clips, &cancel, &mut |_, _| {}, &mut |f| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            f.to_vec().hash(&mut h);
+            rendered.push(h.finish());
+            Ok(())
+        })
+        .unwrap();
+        assert!(during.is_empty(), "{during:?}");
+        let played = shared.take_prints.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&dir);
+        let frames = played.len().min(rendered.len());
+        let wrong: Vec<usize> = (0..frames).filter(|&i| played[i] != rendered[i]).collect();
+        let setting = |f: usize| steps.iter().rev().find(|s| s.0 <= f).map_or("start", |s| s.1.as_str()).to_string();
+        let mut named: Vec<String> = wrong.iter().map(|&f| setting(f)).collect();
+        named.dedup();
+        eprintln!("\nTAKE {} settings, {} pictures played, {} rendered, {} differ", steps.len(), played.len(), rendered.len(), wrong.len());
+        assert_eq!(played.len(), rendered.len());
+        assert!(wrong.is_empty(), "first different picture {} ; settings involved: {:?}", wrong.first().unwrap(), &named[..named.len().min(12)]);
     }
 
     #[test]

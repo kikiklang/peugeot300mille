@@ -151,6 +151,25 @@ pub fn out_frame_at(t: f64, fps: f64) -> i64 {
     (t * fps).round().clamp(0.0, 1e15) as i64
 }
 
+/// A loop loaded, moved or removed during a take.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OverlayChange {
+    /// The first output frame of the take it applies to.
+    pub frame: usize,
+    pub slot: usize,
+    pub file: Option<String>,
+    pub range: Option<(f64, f64)>,
+}
+
+/// A LUT loaded or removed during a take.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LutChange {
+    /// The first output frame of the take it applies to.
+    pub frame: usize,
+    pub output: bool,
+    pub file: Option<String>,
+}
+
 /// Knob values recorded frame by frame while playing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Automation {
@@ -160,12 +179,12 @@ pub struct Automation {
     pub fps_den: u32,
     /// One entry per output frame from `start`.
     pub frames: Vec<Params>,
-    /// LUT files in use while recording.
+    /// LUT files when the take starts.
     #[serde(default)]
     pub lut_in: Option<String>,
     #[serde(default)]
     pub lut_out: Option<String>,
-    /// Overlay files in use while recording.
+    /// Overlay files when the take starts.
     #[serde(default)]
     #[serde(deserialize_with = "crate::params::fill_slots")]
     pub overlays: [Option<String>; N_OVERLAYS],
@@ -173,6 +192,12 @@ pub struct Automation {
     #[serde(default)]
     #[serde(deserialize_with = "crate::params::fill_slots")]
     pub overlay_ranges: [Option<(f64, f64)>; N_OVERLAYS],
+    /// What happened to the loops during the take, in order.
+    #[serde(default)]
+    pub overlay_changes: Vec<OverlayChange>,
+    /// What happened to the LUTs during the take, in order.
+    #[serde(default)]
+    pub lut_changes: Vec<LutChange>,
 }
 
 impl Automation {

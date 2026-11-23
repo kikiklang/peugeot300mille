@@ -104,13 +104,16 @@ fn cli_render(args: &[String]) -> Result<()> {
     let cancel = AtomicBool::new(false);
     let t0 = std::time::Instant::now();
     let mut last = 0.0;
-    render::render(&input, &output, knobs, start, frames, luts, clips, &cancel, &mut |d, n| {
+    let problems = render::render(&input, &output, knobs, start, frames, luts, clips, &cancel, &mut |d, n| {
         let el = t0.elapsed().as_secs_f64();
         if el - last > 1.0 || d == n {
             last = el;
             eprint!("\r{d}/{n} frames, {:.1} fps   ", d as f64 / el.max(1e-9));
         }
     })?;
+    for problem in problems {
+        eprintln!("\n{problem}");
+    }
     eprintln!("\nwrote {}", output.display());
     Ok(())
 }

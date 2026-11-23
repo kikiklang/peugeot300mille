@@ -1,8 +1,7 @@
 //! The offline render of a recorded take, and its progress window.
 
 use super::link::{lock, Link};
-use crate::engine::{lut::Lut, overlay::{Clip, N_OVERLAYS}};
-use crate::render::{render, Knobs};
+use crate::render::{render, take_media, Knobs};
 use crate::runner::Automation;
 use crate::ui::{ACCENT, REC};
 use eframe::egui;
@@ -74,30 +73,12 @@ fn run(auto: &Automation, out: &Path, cancel: &AtomicBool, progress: &Mutex<(i64
     if let Err(e) = saved {
         problems.push(format!("{} non écrit ({e})", json.display()));
     }
-    let mut load_lut = |p: &Option<String>| {
-        let p = p.as_ref()?;
-        match Lut::load(Path::new(p)) {
-            Ok(l) => Some(Arc::new(l)),
-            Err(e) => {
-                problems.push(format!("LUT {p} ignorée ({e:#})"));
-                None
-            }
-        }
-    };
-    let luts = (load_lut(&auto.lut_in), load_lut(&auto.lut_out));
-    let mut clips: [Option<Arc<Clip>>; N_OVERLAYS] = Default::default();
-    for (i, c) in clips.iter_mut().enumerate() {
-        if let Some(p) = &auto.overlays[i] {
-            let (s, e) = auto.overlay_ranges[i].map_or((0.0, None), |(s, e)| (s, Some(e)));
-            match Clip::load_range(Path::new(p), s, e) {
-                Ok(clip) => *c = Some(Arc::new(clip)),
-                Err(e) => problems.push(format!("calque {} ignoré ({e:#})", i + 1)),
-            }
-        }
-    }
+    let (luts, clips, missing) = take_media(auto);
+    problems.extend(missing);
     let r = render(Path::new(&auto.source), out, Knobs::Recorded(auto), auto.start, None, luts, clips, cancel, &mut |d, n| {
         *lock(progress) = (d, n);
     });
+    let r = r.map(|during| problems.extend(during));
     if !problems.is_empty() {
         link.say(format!("Rendu : {}", problems.join(" ; ")));
     }

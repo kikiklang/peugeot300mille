@@ -182,7 +182,12 @@ impl Camera {
                 row[3 * x + 2] = rgb[2].clamp(0.0, 1.0);
             }
             lum
-        }).sum();
+        })
+        // In row order: a parallel float sum rounds differently from run to run, and that tiny
+        // difference would grow through the feedback until a render no longer matched its take.
+        .collect::<Vec<f32>>()
+        .into_iter()
+        .sum();
 
         // --- The tube: lag (bright things fade slowly), bloom, burn-in.
         if p.tube_lag > 0.0 {
