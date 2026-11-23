@@ -485,6 +485,111 @@ impl BeatGrid {
         (inliers * 20 >= hops.len() * 19 && longest <= 8 && b > 0.0).then_some((a, b, numbers))
     }
 
+    /// A long track at one tempo, measured over its whole length: `(first beat, period)` in hops.
+    /// Beat-by-beat tracking can gain a beat at each break or syncopation, which adds up to a
+    /// wrong tempo on a long track. So each 10 s window says where the pulse falls on a ruler at
+    /// the estimated period: if those places form a straight line, its slope gives the exact
+    /// period. Half-beats are used because the loudest hits can move to the off-beat for a while.
+    fn steady_grid(o: &[f32], period: f64) -> Option<(f64, f64)> {
+        const WINDOW: usize = 1000;
+        let windows = o.len() / WINDOW;
+        if windows < 6 {
+            return None;
+        }
+        let half = period / 2.0;
+        let at = |x: f64| {
+            let i = x as usize;
+            if i + 1 >= o.len() { 0.0 } else { o[i] + (o[i + 1] - o[i]) * (x - i as f64) as f32 }
+        };
+        let raw: Vec<(f64, f64)> = (0..windows)
+            .into_par_iter()
+            .map(|w| {
+                let start = ((w * WINDOW) as f64 / half).ceil() * half;
+                let end = ((w + 1) * WINDOW) as f64;
+                let strength = |ph: f64| {
+                    let (mut x, mut sum) = (start + ph, 0.0f32);
+                    while x < end {
+                        sum += at(x);
+                        x += half;
+                    }
+                    sum
+                };
+                let steps = (half * 4.0) as usize;
+                let best = (0..steps).map(|i| i as f64 / 4.0).max_by(|&a, &b| strength(a).total_cmp(&strength(b))).unwrap_or(0.0);
+                (start, best)
+            })
+            .collect();
+        // The phase wraps every half-beat: follow it from the recent windows, so that one odd
+        // window can't throw the rest off by a half-beat.
+        let mut points: Vec<(f64, f64)> = Vec::with_capacity(raw.len());
+        for &(t, ph) in &raw {
+            let mut recent: Vec<f64> = points.iter().rev().take(5).map(|p| p.1).collect();
+            recent.sort_by(f64::total_cmp);
+            let reference = recent.get(recent.len() / 2).copied().unwrap_or(ph);
+            points.push((t, ph + ((reference - ph) / half).round() * half));
+        }
+        let line = |keep: &dyn Fn(&(f64, f64)) -> bool| -> Option<(f64, f64)> {
+            let (mut c, mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for &(x, y) in points.iter().filter(|p| keep(p)) {
+                c += 1.0;
+                sx += x;
+                sy += y;
+                sxx += x * x;
+                sxy += x * y;
+            }
+            let d = c * sxx - sx * sx;
+            (d > 0.0).then(|| ((sy * sxx - sx * sxy) / d, (c * sxy - sx * sy) / d))
+        };
+        let (mut a, mut slope) = line(&|_| true)?;
+        // Tightening in steps: the line settles on the bulk of the track, so a part that really
+        // changed tempo stays off it instead of tilting it.
+        for limit in [6.0, 6.0, 3.0, 3.0] {
+            (a, slope) = line(&|&(x, y)| (y - (a + slope * x)).abs() <= limit)?;
+        }
+        // The test of a steady track: in each window, does the straight grid land about as hard
+        // as the best grid for that window alone? A real change of tempo leaves it between the
+        // hits; a window that is only ambiguous (a break, a syncopation) does not.
+        let exact = period * (1.0 + slope);
+        let step = exact / 2.0;
+        let near = |x: f64| at(x - 1.0).max(at(x)).max(at(x + 1.0));
+        let misses: Vec<bool> = (0..windows)
+            .into_par_iter()
+            .map(|w| {
+                let (start, end) = ((w * WINDOW) as f64, ((w + 1) * WINDOW) as f64);
+                let strength = |first: f64| {
+                    let (mut x, mut sum) = (first, 0.0f32);
+                    while x < end {
+                        sum += near(x);
+                        x += step;
+                    }
+                    sum
+                };
+                let on_grid = strength(start + (a - start).rem_euclid(step));
+                let best = (0..(step * 2.0) as usize).map(|i| strength(start + i as f64 / 2.0)).fold(0.0f32, f32::max);
+                best > 1.0 && on_grid < 0.5 * best
+            })
+            .collect();
+        // A real change of tempo never comes back onto the line: the grid then misses for a long
+        // stretch, or through the very end or start. A miss the line recovers from is only noise.
+        let missed = misses.iter().filter(|&&m| m).count();
+        let longest = misses.split(|m| !*m).map(<[bool]>::len).max().unwrap_or(0);
+        if missed * 100 > windows * 15 || longest > 3 || misses[0] || misses[windows - 1] {
+            return None;
+        }
+        // On the ruler or between its marks: the beat is whichever lands on the harder hits.
+        let total = |first: f64| {
+            let (mut x, mut sum) = (first, 0.0f32);
+            while x < o.len() as f64 {
+                sum += at(x);
+                x += exact;
+            }
+            sum
+        };
+        let first = a.rem_euclid(exact);
+        let other = (first + exact / 2.0).rem_euclid(exact);
+        Some((if total(other) > total(first) { other } else { first }, exact))
+    }
+
     /// Which of the four beats of a bar hits hardest: that one becomes the "1".
     fn strongest_of_four(o: &[f32], hops: &[usize], numbers: &[i64]) -> f64 {
         let mut sum = [0.0f32; 4];
@@ -553,12 +658,20 @@ impl BeatGrid {
         }
         o.iter_mut().for_each(|v| *v /= std);
         let period = Self::period(&o)?;
+        let frames = tv_frames(track.pcm.len() / 2);
+        let secs = Self::HOP as f64 / RATE as f64;
+        if let Some((a, b)) = Self::steady_grid(&o, period) {
+            let count = ((o.len() as f64 - a) / b).ceil().max(0.0) as i64;
+            let numbers: Vec<i64> = (0..count).collect();
+            let hops: Vec<usize> = numbers.iter().map(|&n| ((a + b * n as f64).round() as usize).min(o.len() - 1)).collect();
+            let bar = Self::strongest_of_four(&o, &hops, &numbers);
+            let pos = (0..frames).map(|k| (k as f64 / TV_FPS - a * secs) / (b * secs) - bar).collect();
+            return Some(Self { bpm: 60.0 / (b * secs), pos, onsets: o });
+        }
         let hops = Self::track_beats(&o, period);
         if hops.len() < 4 {
             return None;
         }
-        let frames = tv_frames(track.pcm.len() / 2);
-        let secs = Self::HOP as f64 / RATE as f64;
         // A steady track gets a perfectly regular grid; otherwise the beats are followed one by one.
         if let Some((a, b, numbers)) = Self::steady_fit(&hops, period) {
             let bar = Self::strongest_of_four(&o, &hops, &numbers);
@@ -1671,6 +1784,34 @@ mod tests {
         assert!((beat(7.03) - 4.0).abs() < 0.04, "{}", beat(7.03));
         // Nothing to land on: it starts where it was pressed.
         assert!(g.position((12.0 * TV_FPS) as i64, 0, 0.0, 12.0).unwrap().abs() < 0.07);
+    }
+
+    /// Long breaks and hits moving to the off-beat used to make the tracker gain beats.
+    #[test]
+    fn a_long_steady_track_with_breaks_keeps_its_exact_tempo() {
+        let gap = 60.0 / 77.0;
+        let mut times = Vec::new();
+        for b in 0..400 {
+            let t = 0.4 + b as f64 * gap;
+            match b / 32 % 4 {
+                0 | 2 => times.push(t),
+                1 => times.push(t + gap / 2.0), // The hits move to the off-beat.
+                _ if b % 4 == 0 => times.push(t + gap * 0.75), // A sparse, syncopated break.
+                _ => {}
+            }
+        }
+        let secs = 0.4 + 400.0 * gap + 1.0;
+        let n = (RATE as f64 * secs) as usize;
+        let mut mono = vec![0.0f32; n];
+        for &k in &times {
+            let a = (k * RATE as f64) as usize;
+            for j in 0..RATE as usize / 5 {
+                let s = j as f64 / RATE as f64;
+                mono[a + j] += ((std::f64::consts::TAU * 70.0 * s).sin() * (-30.0 * s).exp() * 0.8) as f32;
+            }
+        }
+        let g = BeatGrid::analyse(&Track { pcm: mono.iter().flat_map(|&x| [x, x]).collect(), truncated: false }).expect("a beat");
+        assert!((g.bpm - 77.0).abs() < 0.02, "read as {:.3} BPM", g.bpm);
     }
 
     #[test]
